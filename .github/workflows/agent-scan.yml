@@ -147,13 +147,11 @@ jobs:
           echo "$FULL_PROMPT" > /tmp/prompt.txt
 
           # Call Copilot CLI in programmatic mode
-          echo "Copilot CLI version: $(copilot --version 2>&1 || echo 'unknown')"
-
-          RESPONSE=""
+          # --output-format json returns JSONL (one JSON event per line)
           set +e
-          RESPONSE=$(copilot -p "$(cat /tmp/prompt.txt)" \
+          copilot -p "$(cat /tmp/prompt.txt)" \
             --output-format json \
-            --no-ask-user 2>/tmp/copilot-stderr.txt)
+            --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
           EXIT_CODE=$?
           set -e
 
@@ -162,37 +160,63 @@ jobs:
             echo "Copilot CLI stderr:"
             cat /tmp/copilot-stderr.txt
           fi
-          if [ -n "$RESPONSE" ]; then
-            echo "Got Copilot CLI response ($(echo "$RESPONSE" | wc -c) chars)"
-            echo "Response preview (first 500 chars):"
-            echo "$RESPONSE" | head -c 500
-            echo ""
-          else
-            echo "Copilot CLI returned empty response."
+          echo "JSONL output: $(wc -l < /tmp/copilot-output.jsonl) lines, $(wc -c < /tmp/copilot-output.jsonl) bytes"
+
+          # Extract all text content from the JSONL event stream
+          # Look for assistant text in data.content, data.text, or data.message fields
+          TEXT=$(cat /tmp/copilot-output.jsonl | \
+            jq -r 'select(.data) | .data | (.content // .text // .message // empty)' 2>/dev/null | \
+            tr -d '\0')
+
+          # Also try: the response might have the verdict in a field we haven't tried
+          if [ -z "$TEXT" ]; then
+            TEXT=$(cat /tmp/copilot-output.jsonl | \
+              jq -r 'select(.type? | test("text|message|content|result")) | .data | tostring' 2>/dev/null | \
+              tr -d '\0')
           fi
 
-          # Try to extract JSON verdict from response
+          # Last resort: grep the raw JSONL for anything containing "verdict"
+          if [ -z "$TEXT" ]; then
+            TEXT=$(grep -o '"verdict"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/copilot-output.jsonl | head -1 || true)
+          fi
+
+          echo "Extracted text length: $(echo "$TEXT" | wc -c) chars"
+          echo "Text preview: $(echo "$TEXT" | head -c 300)"
+
+          # Try to extract JSON verdict from the text content
           PARSED=""
 
-          # Direct JSON with verdict field
-          if [ -n "$RESPONSE" ] && echo "$RESPONSE" | jq -e '.verdict' > /dev/null 2>&1; then
-            PARSED=$(echo "$RESPONSE" | jq -c '.')
+          # Direct JSON
+          if [ -n "$TEXT" ] && echo "$TEXT" | jq -e '.verdict' > /dev/null 2>&1; then
+            PARSED=$(echo "$TEXT" | jq -c '.')
           fi
 
-          # Response may be wrapped — look for JSON in the output
-          if [ -z "$PARSED" ] && [ -n "$RESPONSE" ]; then
-            # Extract from markdown code fence
-            FENCED=$(echo "$RESPONSE" | sed -n '/```json/,/```/p' | sed '1d;$d')
+          # Look for JSON block in text (LLM may wrap it in explanation)
+          if [ -z "$PARSED" ] && [ -n "$TEXT" ]; then
+            # Find JSON with verdict using grep
+            BLOCK=$(echo "$TEXT" | grep -oP '\{[^{}]*"verdict"[^{}]*\}' | head -1 || true)
+            if [ -n "$BLOCK" ] && echo "$BLOCK" | jq -e '.verdict' > /dev/null 2>&1; then
+              PARSED=$(echo "$BLOCK" | jq -c '.')
+            fi
+          fi
+
+          # Try extracting from code fences in the text
+          if [ -z "$PARSED" ] && [ -n "$TEXT" ]; then
+            FENCED=$(echo "$TEXT" | sed -n '/```json/,/```/p' | sed '1d;$d')
             if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
               PARSED=$(echo "$FENCED" | jq -c '.')
             fi
           fi
 
-          if [ -z "$PARSED" ] && [ -n "$RESPONSE" ]; then
-            # Try any code fence
-            FENCED=$(echo "$RESPONSE" | sed -n '/```/,/```/p' | sed '1d;$d')
-            if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
-              PARSED=$(echo "$FENCED" | jq -c '.')
+          # Try building verdict from raw grep of JSONL
+          if [ -z "$PARSED" ]; then
+            RAW_VERDICT=$(grep -oP '"verdict"\s*:\s*"(SAFE|UNSAFE)"' /tmp/copilot-output.jsonl | head -1 | grep -oP '(SAFE|UNSAFE)' || true)
+            if [ -n "$RAW_VERDICT" ]; then
+              RAW_FINDINGS=$(grep -oP '"findings"\s*:\s*\[[^\]]*\]' /tmp/copilot-output.jsonl | head -1 || echo '"findings":[]')
+              PARSED="{\"verdict\":\"${RAW_VERDICT}\",${RAW_FINDINGS}}"
+              if ! echo "$PARSED" | jq '.' > /dev/null 2>&1; then
+                PARSED="{\"verdict\":\"${RAW_VERDICT}\",\"findings\":[]}"
+              fi
             fi
           fi
 
