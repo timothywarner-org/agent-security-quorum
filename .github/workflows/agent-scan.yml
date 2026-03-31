@@ -169,80 +169,53 @@ jobs:
           fi
           echo "JSONL output: $(wc -l < /tmp/copilot-output.jsonl) lines, $(wc -c < /tmp/copilot-output.jsonl) bytes"
 
-          # Extract all text content from the JSONL event stream
-          # Look for assistant text in data.content, data.text, or data.message fields
-          TEXT=$(cat /tmp/copilot-output.jsonl | \
-            jq -r 'select(.data) | .data | (.content // .text // .message // empty)' 2>/dev/null | \
-            tr -d '\0')
+          # --- Extract text from JSONL event stream ---
+          # Broad selector: grab any string from .data fields regardless of key name
+          TEXT=$(jq -r '
+            select(.data != null) | .data |
+            if type == "string" then .
+            elif type == "object" then
+              (.content // .text // .message // .delta // .body // empty) |
+              if type == "array" then .[] | (.text // .content // empty)
+              elif type == "string" then .
+              else empty end
+            else empty end
+          ' /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
 
-          # Also try: the response might have the verdict in a field we haven't tried
+          # Fallback: recursive string extraction from all fields
           if [ -z "$TEXT" ]; then
-            TEXT=$(cat /tmp/copilot-output.jsonl | \
-              jq -r 'select(.type? | test("text|message|content|result")) | .data | tostring' 2>/dev/null | \
-              tr -d '\0')
+            TEXT=$(jq -r '.. | strings' /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
           fi
 
-          # Last resort: grep the raw JSONL for anything containing "verdict"
-          if [ -z "$TEXT" ]; then
-            TEXT=$(grep -o '"verdict"[[:space:]]*:[[:space:]]*"[^"]*"' /tmp/copilot-output.jsonl | head -1 || true)
-          fi
+          echo "Extracted text: $(echo "$TEXT" | wc -c) chars"
 
-          echo "Extracted text length: $(echo "$TEXT" | wc -c) chars"
-          echo "Text preview: $(echo "$TEXT" | head -c 300)"
+          # --- Extract verdict JSON using balanced brace matching ---
+          VERDICT_JSON=$(perl -0777 -ne '
+            while (/(\{(?:[^{}]|(?1))*\})/g) {
+              my $block = $1;
+              if ($block =~ /"verdict"/) { print $block; last; }
+            }
+          ' <<< "$TEXT" 2>/dev/null)
 
-          # Try to extract JSON verdict from the text content
+          # --- Parse and validate ---
           PARSED=""
-
-          # Direct JSON
-          if [ -n "$TEXT" ] && echo "$TEXT" | jq -e '.verdict' > /dev/null 2>&1; then
-            PARSED=$(echo "$TEXT" | jq -c '.')
-          fi
-
-          # Look for JSON block in text (LLM may wrap it in explanation)
-          if [ -z "$PARSED" ] && [ -n "$TEXT" ]; then
-            # Find JSON with verdict using grep
-            BLOCK=$(echo "$TEXT" | grep -oP '\{[^{}]*"verdict"[^{}]*\}' | head -1 || true)
-            if [ -n "$BLOCK" ] && echo "$BLOCK" | jq -e '.verdict' > /dev/null 2>&1; then
-              PARSED=$(echo "$BLOCK" | jq -c '.')
+          if [ -n "$VERDICT_JSON" ] && echo "$VERDICT_JSON" | jq -e '.verdict' > /dev/null 2>&1; then
+            V=$(echo "$VERDICT_JSON" | jq -r '.verdict')
+            if [ "$V" = "SAFE" ] || [ "$V" = "UNSAFE" ]; then
+              # Ensure findings array exists, add model info
+              echo "$VERDICT_JSON" | jq --arg m "${{ matrix.model }}" \
+                '{verdict, findings: (.findings // []), model: $m}' > "results/${LENS}.json"
+              PARSED="yes"
+              echo "Verdict: $V"
             fi
           fi
 
-          # Try extracting from code fences in the text
-          if [ -z "$PARSED" ] && [ -n "$TEXT" ]; then
-            FENCED=$(echo "$TEXT" | sed -n '/```json/,/```/p' | sed '1d;$d')
-            if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
-              PARSED=$(echo "$FENCED" | jq -c '.')
-            fi
-          fi
-
-          # Try building verdict from raw grep of JSONL
-          if [ -z "$PARSED" ]; then
-            RAW_VERDICT=$(grep -oP '"verdict"\s*:\s*"(SAFE|UNSAFE)"' /tmp/copilot-output.jsonl | head -1 | grep -oP '(SAFE|UNSAFE)' || true)
-            if [ -n "$RAW_VERDICT" ]; then
-              RAW_FINDINGS=$(grep -oP '"findings"\s*:\s*\[[^\]]*\]' /tmp/copilot-output.jsonl | head -1 || echo '"findings":[]')
-              PARSED="{\"verdict\":\"${RAW_VERDICT}\",${RAW_FINDINGS}}"
-              if ! echo "$PARSED" | jq '.' > /dev/null 2>&1; then
-                PARSED="{\"verdict\":\"${RAW_VERDICT}\",\"findings\":[]}"
-              fi
-            fi
-          fi
-
-          # Validate verdict is SAFE or UNSAFE
-          if [ -n "$PARSED" ]; then
-            VERDICT=$(echo "$PARSED" | jq -r '.verdict')
-            if [ "$VERDICT" = "SAFE" ] || [ "$VERDICT" = "UNSAFE" ]; then
-              echo "$PARSED" | jq '.' > "results/${LENS}.json"
-              echo "Verdict: $VERDICT"
-            else
-              PARSED=""
-            fi
-          fi
-
-          # Fail-safe: if we couldn't get a valid result, vote UNSAFE
+          # Fail-safe
           if [ -z "$PARSED" ]; then
             echo "FAIL-SAFE: No valid verdict extracted. Voting UNSAFE."
-            echo '{"verdict":"UNSAFE","findings":["Evaluation failed or returned invalid response — fail-safe triggered"],"error":true}' \
-              | jq '.' > "results/${LENS}.json"
+            jq -n --arg m "${{ matrix.model }}" \
+              '{verdict:"UNSAFE",findings:["Evaluation failed or returned invalid response"],model:$m,error:true}' \
+              > "results/${LENS}.json"
           fi
 
           cat "results/${LENS}.json"
@@ -324,15 +297,16 @@ jobs:
           {
             echo "## Agent/Skill Security Scan"
             echo ""
-            echo "| Evaluator | Verdict |"
-            echo "|-----------|---------|"
+            echo "| Evaluator | Model | Verdict |"
+            echo "|-----------|-------|---------|"
             for lens in security privilege compliance; do
               FILE="results/${lens}.json"
               if [ -f "$FILE" ]; then
                 V=$(jq -r '.verdict' "$FILE")
-                [ "$V" = "SAFE" ] && echo "| ${lens} | ✅ SAFE |" || echo "| ${lens} | ❌ UNSAFE |"
+                M=$(jq -r '.model // "unknown"' "$FILE")
+                [ "$V" = "SAFE" ] && echo "| ${lens} | ${M} | ✅ SAFE |" || echo "| ${lens} | ${M} | ❌ UNSAFE |"
               else
-                echo "| ${lens} | ⚠️ MISSING |"
+                echo "| ${lens} | — | ⚠️ MISSING |"
               fi
             done
             echo ""
@@ -347,28 +321,39 @@ jobs:
             const result = '${{ steps.quorum.outputs.result }}';
             const safe = ${{ steps.quorum.outputs.safe }};
             const unsafe = ${{ steps.quorum.outputs.unsafe }};
-            const findings = ${{ steps.quorum.outputs.findings }};
             const icon = result === 'PASS' ? '✅' : '❌';
 
             const fs = require('fs');
             const lenses = ['security', 'privilege', 'compliance'];
-            const rows = lenses.map(lens => {
+            const rows = [];
+            const findingsBlocks = [];
+
+            for (const lens of lenses) {
               try {
                 const data = JSON.parse(fs.readFileSync(`results/${lens}.json`, 'utf8'));
                 const vi = data.verdict === 'SAFE' ? '✅ SAFE' : '❌ UNSAFE';
-                return `| ${lens} | ${vi} |`;
+                const model = data.model || 'unknown';
+                rows.push(`| ${lens} | ${model} | ${vi} |`);
+
+                if (data.findings && data.findings.length > 0 && data.verdict === 'UNSAFE') {
+                  const items = data.findings.map(f => `- ${f}`).join('\n');
+                  findingsBlocks.push(`**${lens}** (${model}):\n${items}`);
+                }
               } catch {
-                return `| ${lens} | ⚠️ MISSING |`;
+                rows.push(`| ${lens} | — | ⚠️ MISSING |`);
               }
-            }).join('\n');
+            }
 
             let body = `## ${icon} Agent/Skill Security Scan\n\n`;
-            body += `| Evaluator | Verdict |\n|-----------|---------|\n${rows}\n\n`;
+            body += `| Evaluator | Model | Verdict |\n|-----------|-------|---------|\n${rows.join('\n')}\n\n`;
             body += `**Quorum: ${result}** (${unsafe}/3 UNSAFE)\n`;
 
-            if (findings && findings.length > 0) {
-              body += `\n### Findings\n\n`;
-              findings.forEach(f => { body += `- ${f}\n`; });
+            if (findingsBlocks.length > 0) {
+              if (result === 'FAIL') {
+                body += `\n### Findings\n\n${findingsBlocks.join('\n\n')}\n`;
+              } else {
+                body += `\n<details>\n<summary>Findings (${findingsBlocks.length} evaluator(s))</summary>\n\n${findingsBlocks.join('\n\n')}\n</details>\n`;
+              }
             }
 
             body += `\n---\n*Scanned by [agent-security-quorum](https://github.com/timothywarner/agent-security-quorum)*`;
