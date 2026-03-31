@@ -44,7 +44,6 @@ jobs:
             echo "Changed files:"
             echo "$FILES"
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            # Pass file list as base64 to preserve newlines
             echo "changed_files=$(echo "$FILES" | base64 -w 0)" >> "$GITHUB_OUTPUT"
           fi
 
@@ -71,25 +70,24 @@ jobs:
 
             echo "  Checking: $file"
 
-            # Extract YAML frontmatter (between --- delimiters)
-            FRONT=$(sed -n '/^---$/,/^---$/p' "$file" | sed '1d;$d')
-
-            if [ -z "$FRONT" ]; then
+            # Check frontmatter exists (file starts with ---)
+            if ! head -1 "$file" | grep -q '^---$'; then
               echo "    WARNING: No YAML frontmatter"
               WARNINGS=$((WARNINGS + 1))
               continue
             fi
 
+            # Extract frontmatter content
+            FRONT=$(sed -n '2,/^---$/p' "$file" | sed '$d')
+
             # Check description exists
-            DESC=$(echo "$FRONT" | yq '.description // ""' 2>/dev/null || echo "")
-            if [ -z "$DESC" ] || [ "$DESC" = "null" ]; then
+            if ! echo "$FRONT" | grep -q '^description:'; then
               echo "    WARNING: Missing 'description' field"
               WARNINGS=$((WARNINGS + 1))
             fi
 
             # Check for wildcard tool access
-            TOOLS=$(echo "$FRONT" | yq '.tools' 2>/dev/null || echo "null")
-            if echo "$TOOLS" | grep -qiE '"\*"|: \*$|"all"'; then
+            if echo "$FRONT" | grep -qiE 'tools:.*(\*|"all"|all)'; then
               echo "    WARNING: Wildcard or unrestricted tool access"
               WARNINGS=$((WARNINGS + 1))
             fi
@@ -99,12 +97,10 @@ jobs:
           echo ""
           echo "Structural warnings: $WARNINGS"
           # Structural issues are informational — LLM quorum is the gate
-        env:
-          # yq is pre-installed on ubuntu-latest runners
-          PATH: ${{ env.PATH }}
 
   # ──────────────────────────────────────────────
   # Job 3: LLM evaluation (3x parallel via matrix)
+  #   Uses GitHub Copilot CLI in programmatic mode
   # ──────────────────────────────────────────────
   llm_scan:
     name: "LLM Scan (${{ matrix.lens }})"
@@ -118,10 +114,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup GitHub Copilot CLI
-        run: gh extension install github/gh-copilot
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
 
       - name: Evaluate with ${{ matrix.lens }} lens
         run: |
@@ -135,45 +132,49 @@ jobs:
             [ -z "$file" ] && continue
             [ ! -f "$file" ] && continue
             FILE_CONTENTS+="FILE: ${file}"$'\n'
-            FILE_CONTENTS+=$(cat "$file")
+            FILE_CONTENTS+="$(cat "$file")"
             FILE_CONTENTS+=$'\n\n'
           done <<< "$FILES"
 
           # Load prompts
           LENS_PROMPT=$(cat "prompts/lens-${LENS}.txt")
           BASE_PROMPT=$(cat "prompts/v1.txt")
-
-          # Combine: lens framing + base prompt + file contents
-          FULL_PROMPT="${LENS_PROMPT}
-
-          ${BASE_PROMPT}
-          ${FILE_CONTENTS}"
+          FULL_PROMPT="${LENS_PROMPT}"$'\n\n'"${BASE_PROMPT}"$'\n'"${FILE_CONTENTS}"
 
           echo "Evaluating with ${LENS} lens ($(echo "$FULL_PROMPT" | wc -c) chars)..."
 
-          # Call Copilot CLI and capture response
+          # Write prompt to temp file to avoid shell escaping issues
+          echo "$FULL_PROMPT" > /tmp/prompt.txt
+
+          # Call Copilot CLI in programmatic mode
           RESPONSE=""
-          if RESPONSE=$(echo "$FULL_PROMPT" | gh copilot suggest -t shell 2>&1); then
-            echo "Got response."
+          if RESPONSE=$(copilot -p "$(cat /tmp/prompt.txt)" \
+            --output-format json \
+            --no-ask-user 2>&1); then
+            echo "Got Copilot CLI response."
           else
             echo "Copilot CLI failed — triggering fail-safe."
           fi
 
-          # Try to extract JSON from response
+          # Try to extract JSON verdict from response
           PARSED=""
-          # Direct JSON
-          if echo "$RESPONSE" | jq -e '.verdict' > /dev/null 2>&1; then
+
+          # Direct JSON with verdict field
+          if [ -n "$RESPONSE" ] && echo "$RESPONSE" | jq -e '.verdict' > /dev/null 2>&1; then
             PARSED=$(echo "$RESPONSE" | jq -c '.')
           fi
-          # From markdown code fence
-          if [ -z "$PARSED" ]; then
+
+          # Response may be wrapped — look for JSON in the output
+          if [ -z "$PARSED" ] && [ -n "$RESPONSE" ]; then
+            # Extract from markdown code fence
             FENCED=$(echo "$RESPONSE" | sed -n '/```json/,/```/p' | sed '1d;$d')
             if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
               PARSED=$(echo "$FENCED" | jq -c '.')
             fi
           fi
-          # From any code fence
-          if [ -z "$PARSED" ]; then
+
+          if [ -z "$PARSED" ] && [ -n "$RESPONSE" ]; then
+            # Try any code fence
             FENCED=$(echo "$RESPONSE" | sed -n '/```/,/```/p' | sed '1d;$d')
             if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
               PARSED=$(echo "$FENCED" | jq -c '.')
@@ -187,7 +188,7 @@ jobs:
               echo "$PARSED" | jq '.' > "results/${LENS}.json"
               echo "Verdict: $VERDICT"
             else
-              PARSED=""  # Invalid verdict, fall through to fail-safe
+              PARSED=""
             fi
           fi
 
@@ -200,9 +201,10 @@ jobs:
 
           cat "results/${LENS}.json"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
 
       - name: Upload result
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: "llm-result-${{ matrix.lens }}"

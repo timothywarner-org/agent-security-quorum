@@ -35,9 +35,19 @@ Each evaluator uses a different analytical lens so the quorum has genuine divers
 ### Prerequisites
 
 - A GitHub repository with [GitHub Actions](https://docs.github.com/en/actions) enabled
-- [GitHub Copilot](https://docs.github.com/en/copilot) access on the repo (Business or Enterprise plan, or individual with Copilot enabled)
+- A [GitHub Copilot](https://docs.github.com/en/copilot) subscription (any plan: Free, Pro, Pro+, Business, or Enterprise)
+- A **Personal Access Token** (fine-grained) with the **"Copilot Requests"** permission, stored as a repository secret named `COPILOT_PAT`
 
-### Step 1: Fork or Copy
+### Step 1: Create a Copilot PAT
+
+The workflow needs a Personal Access Token to authenticate with Copilot CLI.
+
+1. Go to [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
+2. Create a **fine-grained** token with the **"Copilot Requests"** permission
+3. In your repo, go to **Settings > Secrets and variables > Actions**
+4. Click **New repository secret**, name it `COPILOT_PAT`, paste the token value
+
+### Step 2: Fork or Copy
 
 **Option A — Fork this repo** to get everything including test fixtures:
 
@@ -67,7 +77,7 @@ curl -sL https://github.com/timothywarner/agent-security-quorum/archive/main.tar
     agent-security-quorum-main/prompts/
 ```
 
-### Step 2: Create a Branch and Add an Agent File
+### Step 3: Create a Branch and Add an Agent File
 
 ```bash
 git checkout -b test-agent-scan
@@ -90,7 +100,7 @@ tools:
 You answer questions about the codebase. Only read files — never modify anything.
 ```
 
-### Step 3: Push and Open a PR
+### Step 4: Push and Open a PR
 
 ```bash
 git add .github/agents/my-agent.md
@@ -99,7 +109,7 @@ git push -u origin test-agent-scan
 gh pr create --title "Add my-helper agent" --body "Testing the agent security scanner."
 ```
 
-### Step 4: Watch the Scan Run
+### Step 5: Watch the Scan Run
 
 Go to the **Actions** tab on your PR. You'll see four jobs:
 
@@ -108,7 +118,7 @@ Go to the **Actions** tab on your PR. You'll see four jobs:
 3. **LLM Scan (security / privilege / compliance)** — three parallel evaluations
 4. **Quorum Decision** — aggregates votes and posts the result
 
-### Step 5: Check the Results
+### Step 6: Check the Results
 
 The workflow posts a comment on your PR:
 
@@ -144,7 +154,7 @@ If the agent had dangerous instructions, you'd see:
 
 The build fails, blocking the PR from merging.
 
-### Step 6: Try It with a Dangerous Agent
+### Step 7: Try It with a Dangerous Agent
 
 Test with one of the included fixtures. Copy `test/fixtures/prompt-injection.md` into your agents folder:
 
@@ -157,7 +167,7 @@ git push
 
 The scanner should catch it and fail the build.
 
-### Step 7 (Optional): Enforce with Branch Protection
+### Step 8 (Optional): Enforce with Branch Protection
 
 Lock it down so UNSAFE agents can't be merged:
 
@@ -206,11 +216,10 @@ docs/
 
 ## Dependencies
 
-None beyond what GitHub-hosted runners already provide:
-
-- `jq` — pre-installed
-- `yq` — pre-installed
-- `gh` CLI — pre-installed (Copilot extension installed in workflow)
+- `jq` — pre-installed on GitHub runners
+- `node` / `npm` — pre-installed on GitHub runners (used to install Copilot CLI)
+- `@github/copilot` — installed in-workflow via npm
+- A `COPILOT_PAT` secret with the "Copilot Requests" permission
 
 ## Org-Level Deployment
 
