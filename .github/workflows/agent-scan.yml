@@ -153,8 +153,7 @@ jobs:
           set +e
           RESPONSE=$(copilot -p "$(cat /tmp/prompt.txt)" \
             --output-format json \
-            --no-ask-user \
-            --yes 2>/tmp/copilot-stderr.txt)
+            --no-ask-user 2>/tmp/copilot-stderr.txt)
           EXIT_CODE=$?
           set -e
 
