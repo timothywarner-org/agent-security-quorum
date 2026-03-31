@@ -147,13 +147,29 @@ jobs:
           echo "$FULL_PROMPT" > /tmp/prompt.txt
 
           # Call Copilot CLI in programmatic mode
+          echo "Copilot CLI version: $(copilot --version 2>&1 || echo 'unknown')"
+
           RESPONSE=""
-          if RESPONSE=$(copilot -p "$(cat /tmp/prompt.txt)" \
+          set +e
+          RESPONSE=$(copilot -p "$(cat /tmp/prompt.txt)" \
             --output-format json \
-            --no-ask-user 2>&1); then
-            echo "Got Copilot CLI response."
+            --no-ask-user \
+            --yes 2>/tmp/copilot-stderr.txt)
+          EXIT_CODE=$?
+          set -e
+
+          echo "Copilot CLI exit code: $EXIT_CODE"
+          if [ -s /tmp/copilot-stderr.txt ]; then
+            echo "Copilot CLI stderr:"
+            cat /tmp/copilot-stderr.txt
+          fi
+          if [ -n "$RESPONSE" ]; then
+            echo "Got Copilot CLI response ($(echo "$RESPONSE" | wc -c) chars)"
+            echo "Response preview (first 500 chars):"
+            echo "$RESPONSE" | head -c 500
+            echo ""
           else
-            echo "Copilot CLI failed — triggering fail-safe."
+            echo "Copilot CLI returned empty response."
           fi
 
           # Try to extract JSON verdict from response
