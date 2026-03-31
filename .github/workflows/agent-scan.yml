@@ -103,13 +103,19 @@ jobs:
   #   Uses GitHub Copilot CLI in programmatic mode
   # ──────────────────────────────────────────────
   llm_scan:
-    name: "LLM Scan (${{ matrix.lens }})"
+    name: "LLM Scan (${{ matrix.lens }} / ${{ matrix.model }})"
     runs-on: ubuntu-latest
     needs: detect_changes
     if: needs.detect_changes.outputs.has_changes == 'true'
     strategy:
       matrix:
-        lens: [security, privilege, compliance]
+        include:
+          - lens: security
+            model: gpt-4.1
+          - lens: privilege
+            model: claude-sonnet-4.5
+          - lens: compliance
+            model: gemini-2.5-pro
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +126,7 @@ jobs:
       - name: Install Copilot CLI
         run: npm install -g @github/copilot
 
-      - name: Evaluate with ${{ matrix.lens }} lens
+      - name: "Evaluate: ${{ matrix.lens }} lens via ${{ matrix.model }}"
         run: |
           FILES=$(echo "${{ needs.detect_changes.outputs.changed_files }}" | base64 -d)
           LENS="${{ matrix.lens }}"
@@ -150,6 +156,7 @@ jobs:
           # --output-format json returns JSONL (one JSON event per line)
           set +e
           copilot -p "$(cat /tmp/prompt.txt)" \
+            --model "${{ matrix.model }}" \
             --output-format json \
             --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
           EXIT_CODE=$?
