@@ -1,0 +1,358 @@
+name: Agent/Skill Security Scan
+
+on:
+  pull_request:
+    paths:
+      - ".github/agents/**"
+      - ".github/skills/**"
+      - ".claude/agents/**"
+      - ".claude/skills/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Job 1: Detect which agent/skill files changed
+  # ──────────────────────────────────────────────
+  detect_changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+      changed_files: ${{ steps.detect.outputs.changed_files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed agent/skill files
+        id: detect
+        run: |
+          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...HEAD -- \
+            '.github/agents/*.md' \
+            '.github/skills/*/SKILL.md' \
+            '.claude/agents/*.md' \
+            '.claude/skills/*/SKILL.md' \
+          )
+
+          if [ -z "$FILES" ]; then
+            echo "No agent/skill files changed."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changed files:"
+            echo "$FILES"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            # Pass file list as base64 to preserve newlines
+            echo "changed_files=$(echo "$FILES" | base64 -w 0)" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ──────────────────────────────────────────────
+  # Job 2: Structural validation (deterministic)
+  # ──────────────────────────────────────────────
+  validate_structure:
+    name: Validate Structure
+    runs-on: ubuntu-latest
+    needs: detect_changes
+    if: needs.detect_changes.outputs.has_changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate YAML frontmatter
+        run: |
+          FILES=$(echo "${{ needs.detect_changes.outputs.changed_files }}" | base64 -d)
+          WARNINGS=0
+
+          echo "=== Structural Validation ==="
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            [ ! -f "$file" ] && echo "  SKIP: $file (not found)" && continue
+
+            echo "  Checking: $file"
+
+            # Extract YAML frontmatter (between --- delimiters)
+            FRONT=$(sed -n '/^---$/,/^---$/p' "$file" | sed '1d;$d')
+
+            if [ -z "$FRONT" ]; then
+              echo "    WARNING: No YAML frontmatter"
+              WARNINGS=$((WARNINGS + 1))
+              continue
+            fi
+
+            # Check description exists
+            DESC=$(echo "$FRONT" | yq '.description // ""' 2>/dev/null || echo "")
+            if [ -z "$DESC" ] || [ "$DESC" = "null" ]; then
+              echo "    WARNING: Missing 'description' field"
+              WARNINGS=$((WARNINGS + 1))
+            fi
+
+            # Check for wildcard tool access
+            TOOLS=$(echo "$FRONT" | yq '.tools' 2>/dev/null || echo "null")
+            if echo "$TOOLS" | grep -qiE '"\*"|: \*$|"all"'; then
+              echo "    WARNING: Wildcard or unrestricted tool access"
+              WARNINGS=$((WARNINGS + 1))
+            fi
+
+          done <<< "$FILES"
+
+          echo ""
+          echo "Structural warnings: $WARNINGS"
+          # Structural issues are informational — LLM quorum is the gate
+        env:
+          # yq is pre-installed on ubuntu-latest runners
+          PATH: ${{ env.PATH }}
+
+  # ──────────────────────────────────────────────
+  # Job 3: LLM evaluation (3x parallel via matrix)
+  # ──────────────────────────────────────────────
+  llm_scan:
+    name: "LLM Scan (${{ matrix.lens }})"
+    runs-on: ubuntu-latest
+    needs: detect_changes
+    if: needs.detect_changes.outputs.has_changes == 'true'
+    strategy:
+      matrix:
+        lens: [security, privilege, compliance]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup GitHub Copilot CLI
+        run: gh extension install github/gh-copilot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Evaluate with ${{ matrix.lens }} lens
+        run: |
+          FILES=$(echo "${{ needs.detect_changes.outputs.changed_files }}" | base64 -d)
+          LENS="${{ matrix.lens }}"
+          mkdir -p results
+
+          # Build file contents block
+          FILE_CONTENTS=""
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            [ ! -f "$file" ] && continue
+            FILE_CONTENTS+="FILE: ${file}"$'\n'
+            FILE_CONTENTS+=$(cat "$file")
+            FILE_CONTENTS+=$'\n\n'
+          done <<< "$FILES"
+
+          # Load prompts
+          LENS_PROMPT=$(cat "prompts/lens-${LENS}.txt")
+          BASE_PROMPT=$(cat "prompts/v1.txt")
+
+          # Combine: lens framing + base prompt + file contents
+          FULL_PROMPT="${LENS_PROMPT}
+
+          ${BASE_PROMPT}
+          ${FILE_CONTENTS}"
+
+          echo "Evaluating with ${LENS} lens ($(echo "$FULL_PROMPT" | wc -c) chars)..."
+
+          # Call Copilot CLI and capture response
+          RESPONSE=""
+          if RESPONSE=$(echo "$FULL_PROMPT" | gh copilot suggest -t shell 2>&1); then
+            echo "Got response."
+          else
+            echo "Copilot CLI failed — triggering fail-safe."
+          fi
+
+          # Try to extract JSON from response
+          PARSED=""
+          # Direct JSON
+          if echo "$RESPONSE" | jq -e '.verdict' > /dev/null 2>&1; then
+            PARSED=$(echo "$RESPONSE" | jq -c '.')
+          fi
+          # From markdown code fence
+          if [ -z "$PARSED" ]; then
+            FENCED=$(echo "$RESPONSE" | sed -n '/```json/,/```/p' | sed '1d;$d')
+            if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
+              PARSED=$(echo "$FENCED" | jq -c '.')
+            fi
+          fi
+          # From any code fence
+          if [ -z "$PARSED" ]; then
+            FENCED=$(echo "$RESPONSE" | sed -n '/```/,/```/p' | sed '1d;$d')
+            if [ -n "$FENCED" ] && echo "$FENCED" | jq -e '.verdict' > /dev/null 2>&1; then
+              PARSED=$(echo "$FENCED" | jq -c '.')
+            fi
+          fi
+
+          # Validate verdict is SAFE or UNSAFE
+          if [ -n "$PARSED" ]; then
+            VERDICT=$(echo "$PARSED" | jq -r '.verdict')
+            if [ "$VERDICT" = "SAFE" ] || [ "$VERDICT" = "UNSAFE" ]; then
+              echo "$PARSED" | jq '.' > "results/${LENS}.json"
+              echo "Verdict: $VERDICT"
+            else
+              PARSED=""  # Invalid verdict, fall through to fail-safe
+            fi
+          fi
+
+          # Fail-safe: if we couldn't get a valid result, vote UNSAFE
+          if [ -z "$PARSED" ]; then
+            echo "FAIL-SAFE: No valid verdict extracted. Voting UNSAFE."
+            echo '{"verdict":"UNSAFE","findings":["Evaluation failed or returned invalid response — fail-safe triggered"],"error":true}' \
+              | jq '.' > "results/${LENS}.json"
+          fi
+
+          cat "results/${LENS}.json"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: "llm-result-${{ matrix.lens }}"
+          path: "results/${{ matrix.lens }}.json"
+
+  # ──────────────────────────────────────────────
+  # Job 4: Aggregate votes and apply quorum
+  # ──────────────────────────────────────────────
+  aggregate:
+    name: Quorum Decision
+    runs-on: ubuntu-latest
+    needs: [detect_changes, validate_structure, llm_scan]
+    if: needs.detect_changes.outputs.has_changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all evaluation results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: llm-result-*
+          path: results/
+          merge-multiple: true
+
+      - name: Apply quorum
+        id: quorum
+        run: |
+          echo "=========================================="
+          echo "  QUORUM AGGREGATION"
+          echo "=========================================="
+
+          SAFE=0
+          UNSAFE=0
+
+          for lens in security privilege compliance; do
+            FILE="results/${lens}.json"
+            if [ ! -f "$FILE" ]; then
+              echo "  [${lens}] MISSING — counting as UNSAFE"
+              UNSAFE=$((UNSAFE + 1))
+              continue
+            fi
+
+            VERDICT=$(jq -r '.verdict // "UNKNOWN"' "$FILE")
+            case "$VERDICT" in
+              SAFE)   echo "  [${lens}] SAFE";   SAFE=$((SAFE + 1)) ;;
+              UNSAFE) echo "  [${lens}] UNSAFE"; UNSAFE=$((UNSAFE + 1)) ;;
+              *)      echo "  [${lens}] UNKNOWN — counting as UNSAFE"; UNSAFE=$((UNSAFE + 1)) ;;
+            esac
+          done
+
+          echo ""
+          echo "  SAFE: $SAFE / UNSAFE: $UNSAFE"
+
+          if [ "$UNSAFE" -ge 2 ]; then
+            echo "  QUORUM: FAIL"
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+          else
+            echo "  QUORUM: PASS"
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
+          echo "unsafe=$UNSAFE" >> "$GITHUB_OUTPUT"
+
+          # Collect all findings for the PR comment
+          FINDINGS=$(jq -s '[.[].findings[]? // empty] | unique' results/*.json)
+          echo "findings=$(echo "$FINDINGS" | jq -c '.')" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Agent/Skill Security Scan"
+            echo ""
+            echo "| Evaluator | Verdict |"
+            echo "|-----------|---------|"
+            for lens in security privilege compliance; do
+              FILE="results/${lens}.json"
+              if [ -f "$FILE" ]; then
+                V=$(jq -r '.verdict' "$FILE")
+                [ "$V" = "SAFE" ] && echo "| ${lens} | ✅ SAFE |" || echo "| ${lens} | ❌ UNSAFE |"
+              else
+                echo "| ${lens} | ⚠️ MISSING |"
+              fi
+            done
+            echo ""
+            echo "**Quorum: ${{ steps.quorum.outputs.result }}** (${{ steps.quorum.outputs.unsafe }}/3 UNSAFE)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = '${{ steps.quorum.outputs.result }}';
+            const safe = ${{ steps.quorum.outputs.safe }};
+            const unsafe = ${{ steps.quorum.outputs.unsafe }};
+            const findings = ${{ steps.quorum.outputs.findings }};
+            const icon = result === 'PASS' ? '✅' : '❌';
+
+            const fs = require('fs');
+            const lenses = ['security', 'privilege', 'compliance'];
+            const rows = lenses.map(lens => {
+              try {
+                const data = JSON.parse(fs.readFileSync(`results/${lens}.json`, 'utf8'));
+                const vi = data.verdict === 'SAFE' ? '✅ SAFE' : '❌ UNSAFE';
+                return `| ${lens} | ${vi} |`;
+              } catch {
+                return `| ${lens} | ⚠️ MISSING |`;
+              }
+            }).join('\n');
+
+            let body = `## ${icon} Agent/Skill Security Scan\n\n`;
+            body += `| Evaluator | Verdict |\n|-----------|---------|\n${rows}\n\n`;
+            body += `**Quorum: ${result}** (${unsafe}/3 UNSAFE)\n`;
+
+            if (findings && findings.length > 0) {
+              body += `\n### Findings\n\n`;
+              findings.forEach(f => { body += `- ${f}\n`; });
+            }
+
+            body += `\n---\n*Scanned by [agent-security-quorum](https://github.com/timothywarner/agent-security-quorum)*`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.body.includes('Agent/Skill Security Scan')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail on UNSAFE quorum
+        if: steps.quorum.outputs.result == 'FAIL'
+        run: |
+          echo "❌ Quorum voted UNSAFE — failing build."
+          exit 1

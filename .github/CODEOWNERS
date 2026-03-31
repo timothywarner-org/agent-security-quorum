@@ -1,0 +1,10 @@
+# Agent and skill definitions require security review
+.github/agents/   @timothywarner
+.github/skills/   @timothywarner
+.claude/agents/   @timothywarner
+.claude/skills/   @timothywarner
+
+# The scanner itself requires review
+scripts/          @timothywarner
+prompts/          @timothywarner
+.github/workflows/agent-scan.yml @timothywarner
