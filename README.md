@@ -1,4 +1,13 @@
+<p align="center">
+  <img src="images/logo.png" alt="Agent Security Quorum" width="400">
+</p>
+
 # Agent Security Quorum
+
+[![Website](https://img.shields.io/badge/TechTrainerTim.com-4285F4?style=for-the-badge&logo=google-chrome&logoColor=white)](https://techtrainertim.com)
+[![GitHub Org](https://img.shields.io/badge/timothywarner--org-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/timothywarner-org)
+[![GitHub](https://img.shields.io/badge/timothywarner-6e40c9?style=for-the-badge&logo=github&logoColor=white)](https://github.com/timothywarner)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)](LICENSE)
 
 Automated security scanning for AI agent and skill definition files in GitHub pull requests, using multi-model LLM consensus to catch prompt injection, privilege escalation, and data exfiltration before merge.
 
