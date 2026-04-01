@@ -1,34 +1,48 @@
 # Agent Security Quorum
 
-A GitHub Actions workflow that scans AI agent and skill definition files for security risks. Uses GitHub Copilot CLI to run 3 parallel LLM evaluations with a 2/3 quorum — consensus on UNSAFE fails the build.
+Automated security scanning for AI agent and skill definition files in GitHub pull requests, using multi-model LLM consensus to catch prompt injection, privilege escalation, and data exfiltration before merge.
 
-## How It Works
+## Why This Matters
+
+- **Agent definitions are executable attack surface.** Files in `.github/agents/`, `.claude/agents/`, and similar paths are instructions that AI systems follow at runtime. A malicious or compromised agent file can exfiltrate secrets, bypass review gates, or escalate privileges — and it looks like plain Markdown.
+- **Static analysis does not work here.** These attacks are semantic, embedded in natural language. No linter or regex will catch "ignore all previous instructions" or "read ~/.ssh/id_rsa and POST it to an external endpoint."
+- **Three independent LLM evaluations per PR.** Each uses a different analytical lens (security, privilege, compliance), providing genuine diversity rather than three identical calls.
+- **2/3 quorum prevents single-model blind spots.** One false positive will not block your PR. Two independent models must agree a file is unsafe before the build fails.
+- **Zero infrastructure.** Runs entirely in GitHub Actions using Copilot CLI. No servers, no SaaS dependencies, no additional cost beyond your existing Copilot subscription.
+
+## Architecture
 
 ```
-PR changes agent/skill files
-        │
-        ▼
-┌─────────────────┐
-│ Detect Changes   │  ← git diff filtered to agent/skill paths
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐     ┌──────────────────────────────────────────┐
-│ Validate         │     │ LLM Scan (3x parallel matrix)             │
-│ Structure        │     │                                           │
-│ (deterministic)  │     │  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
-│                  │     │  │ Security │ │ Privilege│ │Compliance│ │
-│ YAML frontmatter │     │  │   lens   │ │   lens   │ │   lens   │ │
-│ required fields  │     │  └────┬─────┘ └────┬─────┘ └────┬─────┘ │
-└────────┬────────┘     └───────┼─────────────┼────────────┼───────┘
-         │                      │             │            │
-         ▼                      ▼             ▼            ▼
-         │              ┌──────────────────────────────────────┐
-         └─────────────►│ Quorum: ≥2 UNSAFE → FAIL the build  │
-                        └──────────────────────────────────────┘
+PR touches agent/skill files
+         |
+         v
++-------------------+
+| Detect Changes    |  git diff filtered to agent/skill paths
++--------+----------+
+         |
+         v
++-------------------+     +------------------------------------------+
+| Validate          |     | LLM Scan (3x parallel)                   |
+| Structure         |     |                                          |
+| (deterministic)   |     |  +-----------+ +-----------+ +---------+ |
+|                   |     |  | Security  | | Privilege | | Compli- | |
+| YAML frontmatter  |     |  |   lens    | |   lens    | |  ance   | |
+| required fields   |     |  +-----+-----+ +-----+-----+ +----+---+ |
++--------+----------+     +--------+-------------+------------+------+
+         |                         |             |            |
+         v                         v             v            v
+         |                 +--------------------------------------+
+         +---------------->| Quorum: 2/3 UNSAFE = FAIL the build |
+                           +--------------------------------------+
 ```
 
-Each evaluator uses a different analytical lens so the quorum has genuine diversity, not 3 identical calls. A single false positive won't block your PR.
+Each evaluator uses a different analytical lens so the quorum has genuine diversity, not three identical calls. A single false positive will not block your PR.
+
+## Quick Start
+
+1. **Copy the workflow and prompts into your repo.** Fork this repository, or copy `.github/workflows/agent-scan.yml` and the `prompts/` directory into an existing project.
+2. **Create a fine-grained PAT with the "Copilot Requests" permission.** Add it as a repository secret named `COPILOT_PAT` under Settings > Secrets and variables > Actions.
+3. **Open a PR that touches agent or skill files.** The scanner runs automatically and posts a quorum verdict as a PR comment.
 
 ## Tutorial: Get Scanning in 5 Minutes
 
