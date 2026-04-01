@@ -113,7 +113,7 @@ jobs:
           - lens: security
             model: gpt-4.1
           - lens: privilege
-            model: claude-sonnet-4.5
+            model: claude-sonnet-4
           - lens: compliance
             model: gemini-2.5-pro
       fail-fast: false
@@ -154,20 +154,39 @@ jobs:
 
           # Call Copilot CLI in programmatic mode
           # --output-format json returns JSONL (one JSON event per line)
+          MODEL="${{ matrix.model }}"
           set +e
           copilot -p "$(cat /tmp/prompt.txt)" \
-            --model "${{ matrix.model }}" \
+            --model "$MODEL" \
             --output-format json \
             --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
           EXIT_CODE=$?
           set -e
 
-          echo "Copilot CLI exit code: $EXIT_CODE"
+          # If model flag failed, retry without it (uses default model)
+          if [ "$EXIT_CODE" -ne 0 ] && grep -qi "not available\|unknown model\|invalid model" /tmp/copilot-stderr.txt 2>/dev/null; then
+            echo "Model '$MODEL' not available — retrying with default model..."
+            MODEL="default"
+            set +e
+            copilot -p "$(cat /tmp/prompt.txt)" \
+              --output-format json \
+              --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
+            EXIT_CODE=$?
+            set -e
+          fi
+
+          echo "Copilot CLI exit code: $EXIT_CODE (model: $MODEL)"
           if [ -s /tmp/copilot-stderr.txt ]; then
             echo "Copilot CLI stderr:"
             cat /tmp/copilot-stderr.txt
           fi
-          echo "JSONL output: $(wc -l < /tmp/copilot-output.jsonl) lines, $(wc -c < /tmp/copilot-output.jsonl) bytes"
+          JSONL_LINES=$(wc -l < /tmp/copilot-output.jsonl)
+          JSONL_BYTES=$(wc -c < /tmp/copilot-output.jsonl)
+          echo "JSONL output: $JSONL_LINES lines, $JSONL_BYTES bytes"
+
+          # Debug: show event types in the JSONL stream
+          echo "Event types:"
+          jq -r '.type // "no-type"' /tmp/copilot-output.jsonl 2>/dev/null | sort | uniq -c | sort -rn || true
 
           # --- Extract text from JSONL event stream ---
           # Broad selector: grab any string from .data fields regardless of key name
@@ -203,7 +222,7 @@ jobs:
             V=$(echo "$VERDICT_JSON" | jq -r '.verdict')
             if [ "$V" = "SAFE" ] || [ "$V" = "UNSAFE" ]; then
               # Ensure findings array exists, add model info
-              echo "$VERDICT_JSON" | jq --arg m "${{ matrix.model }}" \
+              echo "$VERDICT_JSON" | jq --arg m "$MODEL" \
                 '{verdict, findings: (.findings // []), model: $m}' > "results/${LENS}.json"
               PARSED="yes"
               echo "Verdict: $V"
@@ -213,7 +232,7 @@ jobs:
           # Fail-safe
           if [ -z "$PARSED" ]; then
             echo "FAIL-SAFE: No valid verdict extracted. Voting UNSAFE."
-            jq -n --arg m "${{ matrix.model }}" \
+            jq -n --arg m "$MODEL" \
               '{verdict:"UNSAFE",findings:["Evaluation failed or returned invalid response"],model:$m,error:true}' \
               > "results/${LENS}.json"
           fi
