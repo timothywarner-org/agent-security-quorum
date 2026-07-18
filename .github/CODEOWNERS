@@ -3,6 +3,7 @@
 .github/skills/   @timothywarner
 .claude/agents/   @timothywarner
 .claude/skills/   @timothywarner
+.agents/skills/   @timothywarner
 
 # The scanner itself requires review
 scripts/          @timothywarner

@@ -7,14 +7,20 @@ on:
       - ".github/skills/**"
       - ".claude/agents/**"
       - ".claude/skills/**"
+      - ".agents/skills/**"
 
 permissions:
   contents: read
   pull-requests: write
+  security-events: write
 
 jobs:
   # ──────────────────────────────────────────────
   # Job 1: Detect which agent/skill files changed
+  #   Scope is ALL files under agent/skill dirs,
+  #   not just *.md — malicious payloads ride in
+  #   bundled scripts and test files, not only in
+  #   instruction markdown (Gecko Security, 2026).
   # ──────────────────────────────────────────────
   detect_changes:
     name: Detect Changes
@@ -30,11 +36,13 @@ jobs:
       - name: Find changed agent/skill files
         id: detect
         run: |
-          FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }}...HEAD -- \
-            '.github/agents/*.md' \
-            '.github/skills/*/SKILL.md' \
-            '.claude/agents/*.md' \
-            '.claude/skills/*/SKILL.md' \
+          # --diff-filter=d excludes deletions: a removed file cannot carry a payload
+          FILES=$(git diff --name-only --diff-filter=d ${{ github.event.pull_request.base.sha }}...HEAD -- \
+            '.github/agents' \
+            '.github/skills' \
+            '.claude/agents' \
+            '.claude/skills' \
+            '.agents/skills' \
           )
 
           if [ -z "$FILES" ]; then
@@ -48,7 +56,62 @@ jobs:
           fi
 
   # ──────────────────────────────────────────────
-  # Job 2: Structural validation (deterministic)
+  # Job 2: Test-file gate (deterministic, hard fail)
+  #   Blocks the documented scanner bypass where a
+  #   skill ships a clean SKILL.md plus a *.test.ts
+  #   payload that Jest/Vitest/pytest auto-discover
+  #   and execute with developer credentials.
+  #   No agent is involved in that attack, so the
+  #   LLM lenses cannot be the only control.
+  # ──────────────────────────────────────────────
+  test_file_gate:
+    name: Test-File Gate
+    runs-on: ubuntu-latest
+    needs: detect_changes
+    if: needs.detect_changes.outputs.has_changes == 'true'
+    outputs:
+      forbidden: ${{ steps.gate.outputs.forbidden }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Block executable payloads in agent/skill directories
+        id: gate
+        run: |
+          # Full-tree check, not diff-only: a payload already merged is just as
+          # dangerous as one arriving in this PR (OWASP AST02, Supply Chain).
+          FORBIDDEN=""
+          for root in .github/agents .github/skills .claude/agents .claude/skills .agents/skills; do
+            [ -d "$root" ] || continue
+            MATCHES=$(find "$root" \
+              \( -name "*.test.*" -o -name "*.spec.*" -o -name "conftest.py" \
+                 -o -name "*.config.*" -o -type d -name "__tests__" \) -print)
+            [ -n "$MATCHES" ] && FORBIDDEN+="${MATCHES}"$'\n'
+          done
+
+          if [ -n "$FORBIDDEN" ]; then
+            echo "forbidden=$(printf '%s' "$FORBIDDEN" | base64 -w 0)" >> "$GITHUB_OUTPUT"
+            {
+              echo "## ❌ Test-File Gate"
+              echo ""
+              echo "Executable payload files found inside agent/skill directories."
+              echo "Test files, spec files, conftest.py, and build configs have no"
+              echo "legitimate reason to exist there. Test runners auto-discover and"
+              echo "execute them with full developer credentials (OWASP AST02)."
+              echo ""
+              echo '```'
+              printf '%s' "$FORBIDDEN"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ Forbidden files found:"
+            printf '%s' "$FORBIDDEN"
+            exit 1
+          fi
+
+          echo "forbidden=" >> "$GITHUB_OUTPUT"
+          echo "✅ No executable payloads in agent/skill directories."
+
+  # ──────────────────────────────────────────────
+  # Job 3: Structural validation (deterministic)
   # ──────────────────────────────────────────────
   validate_structure:
     name: Validate Structure
@@ -67,6 +130,13 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             [ ! -f "$file" ] && echo "  SKIP: $file (not found)" && continue
+
+            # Frontmatter rules only apply to instruction markdown; bundled
+            # scripts are covered by the test-file gate and the LLM/static scans
+            case "$file" in
+              *.md) ;;
+              *) echo "  SKIP (non-markdown): $file"; continue ;;
+            esac
 
             echo "  Checking: $file"
 
@@ -96,10 +166,10 @@ jobs:
 
           echo ""
           echo "Structural warnings: $WARNINGS"
-          # Structural issues are informational — LLM quorum is the gate
+          # Structural issues are informational — the quorum is the gate
 
   # ──────────────────────────────────────────────
-  # Job 3: LLM evaluation (3x parallel via matrix)
+  # Job 4: LLM evaluation (3x parallel via matrix)
   #   Uses GitHub Copilot CLI in programmatic mode
   # ──────────────────────────────────────────────
   llm_scan:
@@ -132,14 +202,24 @@ jobs:
           LENS="${{ matrix.lens }}"
           mkdir -p results
 
-          # Build file contents block
+          # Build file contents block. Each file is wrapped in explicit
+          # untrusted-content markers so a malicious file cannot pose as
+          # instructions to the evaluator (prompt injection at scan time).
           FILE_CONTENTS=""
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             [ ! -f "$file" ] && continue
-            FILE_CONTENTS+="FILE: ${file}"$'\n'
-            FILE_CONTENTS+="$(cat "$file")"
-            FILE_CONTENTS+=$'\n\n'
+            # grep -I treats binary as no-match: binary blobs pollute the prompt
+            if ! grep -qI . "$file"; then
+              FILE_CONTENTS+="=== SKIPPED (binary or empty): ${file} ==="$'\n\n'
+              continue
+            fi
+            FILE_CONTENTS+="=== BEGIN UNTRUSTED FILE: ${file} ==="$'\n'
+            FILE_CONTENTS+="$(head -c 16384 "$file")"$'\n'
+            if [ "$(wc -c < "$file")" -gt 16384 ]; then
+              FILE_CONTENTS+="[TRUNCATED at 16384 bytes]"$'\n'
+            fi
+            FILE_CONTENTS+="=== END UNTRUSTED FILE: ${file} ==="$'\n\n'
           done <<< "$FILES"
 
           # Load prompts
@@ -216,14 +296,23 @@ jobs:
             }
           ' <<< "$TEXT" 2>/dev/null)
 
-          # --- Parse and validate ---
+          # --- Parse, validate, and normalize findings to the shared contract:
+          #     {id: AST01..AST10|UNMAPPED, file, detail}
+          #     String findings from older prompts are tolerated and wrapped.
           PARSED=""
           if [ -n "$VERDICT_JSON" ] && echo "$VERDICT_JSON" | jq -e '.verdict' > /dev/null 2>&1; then
             V=$(echo "$VERDICT_JSON" | jq -r '.verdict')
             if [ "$V" = "SAFE" ] || [ "$V" = "UNSAFE" ]; then
-              # Ensure findings array exists, add model info
-              echo "$VERDICT_JSON" | jq --arg m "$MODEL" \
-                '{verdict, findings: (.findings // []), model: $m}' > "results/${LENS}.json"
+              echo "$VERDICT_JSON" | jq --arg m "$MODEL" --arg l "$LENS" '{
+                verdict,
+                findings: [ (.findings // [])[]
+                  | if type == "string"
+                    then {id: "UNMAPPED", file: null, detail: .}
+                    else {id: (.id // "UNMAPPED"), file: (.file // null), detail: (.detail // .message // tostring)}
+                    end ],
+                model: $m,
+                lens: $l
+              }' > "results/${LENS}.json"
               PARSED="yes"
               echo "Verdict: $V"
             fi
@@ -232,8 +321,8 @@ jobs:
           # Fail-safe
           if [ -z "$PARSED" ]; then
             echo "FAIL-SAFE: No valid verdict extracted. Voting UNSAFE."
-            jq -n --arg m "$MODEL" \
-              '{verdict:"UNSAFE",findings:["Evaluation failed or returned invalid response"],model:$m,error:true}' \
+            jq -n --arg m "$MODEL" --arg l "$LENS" \
+              '{verdict:"UNSAFE",findings:[{id:"UNMAPPED",file:null,detail:"Evaluation failed or returned invalid response"}],model:$m,lens:$l,error:true}' \
               > "results/${LENS}.json"
           fi
 
@@ -245,24 +334,121 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "llm-result-${{ matrix.lens }}"
+          name: "eval-result-${{ matrix.lens }}"
           path: "results/${{ matrix.lens }}.json"
 
   # ──────────────────────────────────────────────
-  # Job 4: Aggregate votes and apply quorum
+  # Job 5: Static scan (4th quorum voter)
+  #   Cisco's open-source skill-scanner: YARA rules,
+  #   AST dataflow, and taint analysis. Mixed-mode
+  #   consensus means a bypass must defeat two
+  #   fundamentally different detection classes,
+  #   not just fool three LLMs.
+  # ──────────────────────────────────────────────
+  static_scan:
+    name: "Static Scan (cisco-skill-scanner)"
+    runs-on: ubuntu-latest
+    needs: detect_changes
+    if: needs.detect_changes.outputs.has_changes == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Cisco skill-scanner
+        # Pin to a validated version in production; unpinned here so the
+        # teaching repo tracks upstream detection improvements
+        run: pip install cisco-ai-skill-scanner
+
+      - name: Scan agent/skill directories
+        run: |
+          mkdir -p results
+          RAW_DIR=$(mktemp -d)
+          DIRS_PRESENT=0
+          SCANNED=0
+
+          for root in .github/agents .github/skills .claude/agents .claude/skills .agents/skills; do
+            [ -d "$root" ] || continue
+            DIRS_PRESENT=$((DIRS_PRESENT + 1))
+            OUT="${RAW_DIR}/$(echo "$root" | tr '/' '-').json"
+            # --lenient accepts non-standard layouts (Claude Code agents are
+            # bare .md files, not SKILL.md packages). The tool's exit code is
+            # informational here: findings decide the vote, the quorum decides
+            # the build.
+            set +e
+            skill-scanner scan-all "$root" --recursive --lenient --format json > "$OUT" 2>"${OUT}.err"
+            EXIT_CODE=$?
+            set -e
+            echo "[$root] skill-scanner exit code: $EXIT_CODE"
+            if ! jq -e . "$OUT" > /dev/null 2>&1; then
+              echo "[$root] No parseable JSON output. stderr:"
+              cat "${OUT}.err" || true
+              rm -f "$OUT"
+              continue
+            fi
+            SCANNED=$((SCANNED + 1))
+          done
+
+          RAW_FILES=$(ls "$RAW_DIR"/*.json 2>/dev/null || true)
+
+          if [ "$SCANNED" -gt 0 ]; then
+            # Best-effort normalization: the JSON schema is Cisco's, not ours,
+            # so recursively collect anything carrying a severity field and map
+            # it onto the shared evaluator contract. Critical/high = UNSAFE.
+            HIGH=$(jq -s '[.. | objects | .severity? // empty | tostring | ascii_downcase
+                           | select(. == "critical" or . == "high")] | length' $RAW_FILES)
+            FINDINGS=$(jq -s '[.. | objects | select(.severity? != null)
+              | {id: "UNMAPPED",
+                 file: (.file // .path // .skill // null),
+                 detail: ((.severity | tostring | ascii_downcase) + ": "
+                          + (.title // .message // .description // .rule_id // "static analysis finding"))}]
+              | unique | .[0:30]' $RAW_FILES)
+            if [ "$HIGH" -gt 0 ]; then VERDICT="UNSAFE"; else VERDICT="SAFE"; fi
+            jq -n --arg v "$VERDICT" --argjson f "$FINDINGS" \
+              '{verdict: $v, findings: $f, model: "cisco-skill-scanner", lens: "static"}' > results/static.json
+            echo "Verdict: $VERDICT (critical/high findings: $HIGH)"
+          elif [ "$DIRS_PRESENT" -eq 0 ]; then
+            # Changed files were all deletions: nothing on disk to scan
+            jq -n '{verdict:"SAFE", findings:[], model:"cisco-skill-scanner", lens:"static"}' > results/static.json
+            echo "Verdict: SAFE (no agent/skill directories present after change)"
+          else
+            # Fail closed: directories exist but the scanner produced nothing usable
+            jq -n '{verdict:"UNSAFE",findings:[{id:"UNMAPPED",file:null,detail:"Static scanner produced no parseable output"}],model:"cisco-skill-scanner",lens:"static",error:true}' \
+              > results/static.json
+            echo "FAIL-SAFE: static scanner produced no parseable output. Voting UNSAFE."
+          fi
+
+          cat results/static.json
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "eval-result-static"
+          path: "results/static.json"
+
+  # ──────────────────────────────────────────────
+  # Job 6: Aggregate votes and apply quorum
+  #   Runs even when upstream jobs fail (always())
+  #   so a red Test-File Gate still produces a red
+  #   Quorum Decision — required-check protection
+  #   would otherwise treat a skipped job as passed.
   # ──────────────────────────────────────────────
   aggregate:
     name: Quorum Decision
     runs-on: ubuntu-latest
-    needs: [detect_changes, validate_structure, llm_scan]
-    if: needs.detect_changes.outputs.has_changes == 'true'
+    needs: [detect_changes, test_file_gate, validate_structure, llm_scan, static_scan]
+    if: always() && needs.detect_changes.outputs.has_changes == 'true'
     steps:
       - uses: actions/checkout@v4
 
       - name: Download all evaluation results
         uses: actions/download-artifact@v4
         with:
-          pattern: llm-result-*
+          pattern: eval-result-*
           path: results/
           merge-multiple: true
 
@@ -276,7 +462,7 @@ jobs:
           SAFE=0
           UNSAFE=0
 
-          for lens in security privilege compliance; do
+          for lens in security privilege compliance static; do
             FILE="results/${lens}.json"
             if [ ! -f "$FILE" ]; then
               echo "  [${lens}] MISSING — counting as UNSAFE"
@@ -292,10 +478,15 @@ jobs:
             esac
           done
 
+          GATE_RESULT="${{ needs.test_file_gate.result }}"
           echo ""
+          echo "  Test-file gate: $GATE_RESULT"
           echo "  SAFE: $SAFE / UNSAFE: $UNSAFE"
 
-          if [ "$UNSAFE" -ge 2 ]; then
+          # Two triggers for FAIL:
+          #   1. Quorum: >=2 of 4 evaluators vote UNSAFE
+          #   2. Gate: forbidden executable files present (deterministic, no vote)
+          if [ "$UNSAFE" -ge 2 ] || [ "$GATE_RESULT" != "success" ]; then
             echo "  QUORUM: FAIL"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
           else
@@ -305,10 +496,96 @@ jobs:
 
           echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
           echo "unsafe=$UNSAFE" >> "$GITHUB_OUTPUT"
+          echo "gate=$GATE_RESULT" >> "$GITHUB_OUTPUT"
 
-          # Collect all findings for the PR comment
-          FINDINGS=$(jq -s '[.[].findings[]? // empty] | unique' results/*.json)
-          echo "findings=$(echo "$FINDINGS" | jq -c '.')" >> "$GITHUB_OUTPUT"
+      - name: Generate SARIF
+        if: always()
+        run: |
+          # Findings land in the GitHub Security tab via code scanning, mapped
+          # to OWASP Agentic Skills Top 10 rule IDs (AST01..AST10)
+          EXISTING=""
+          for lens in security privilege compliance static; do
+            [ -f "results/${lens}.json" ] && EXISTING="$EXISTING results/${lens}.json"
+          done
+
+          if [ -n "$EXISTING" ]; then
+            COMBINED=$(jq -s '[ .[] | . as $r | ($r.findings // [])[]
+              | {id: (.id // "UNMAPPED"),
+                 file: (.file // null),
+                 detail: (.detail // "finding"),
+                 evaluator: (($r.lens // "unknown") + "/" + ($r.model // "unknown")),
+                 verdict: ($r.verdict // "UNKNOWN")} ]' $EXISTING)
+          else
+            COMBINED="[]"
+          fi
+
+          # Fold the deterministic gate verdict in as an AST02 finding
+          GATE_RESULT="${{ needs.test_file_gate.result }}"
+          if [ "$GATE_RESULT" != "success" ]; then
+            GATE_FILES=$(echo "${{ needs.test_file_gate.outputs.forbidden }}" | base64 -d 2>/dev/null || true)
+            COMBINED=$(jq --arg files "$GATE_FILES" '
+              ($files | split("\n") | map(select(length > 0))) as $list |
+              . + [{id: "AST02",
+                    file: ($list | first),
+                    detail: ("Forbidden executable file(s) in agent/skill directories: " + ($list | join(", "))),
+                    evaluator: "test-file-gate/deterministic",
+                    verdict: "UNSAFE"}]' <<< "$COMBINED")
+          fi
+
+          # Findings without a usable file path anchor to the first changed file
+          DEFAULT_FILE=$(echo "${{ needs.detect_changes.outputs.changed_files }}" | base64 -d | head -1)
+          [ -z "$DEFAULT_FILE" ] && DEFAULT_FILE=".github/workflows/agent-scan.yml"
+
+          jq -n --argjson findings "$COMBINED" --arg defaultFile "$DEFAULT_FILE" '
+            {"AST01": "Malicious Skills",
+             "AST02": "Supply Chain Compromise",
+             "AST03": "Over-Privileged Skills",
+             "AST04": "Insecure Metadata",
+             "AST05": "Untrusted External Instructions",
+             "AST06": "Weak Isolation",
+             "AST07": "Update Drift",
+             "AST08": "Poor Scanning",
+             "AST09": "No Governance",
+             "AST10": "Cross-Platform Reuse",
+             "UNMAPPED": "Agent security finding"} as $titles |
+            def cleanfile:
+              if . == null or . == "" or . == "null" then null
+              elif startswith("/") or startswith("http") then null
+              else . end;
+            {
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "version": "2.1.0",
+              "runs": [{
+                "tool": {"driver": {
+                  "name": "agent-security-quorum",
+                  "informationUri": "https://github.com/timothywarner/agent-security-quorum",
+                  "rules": ([$findings[].id] | unique | map({
+                    "id": .,
+                    "shortDescription": {"text": ("OWASP Agentic Skills " + . + ": " + ($titles[.] // "Agent security finding"))}
+                  }))
+                }},
+                "results": ($findings | map({
+                  "ruleId": .id,
+                  "level": (if .verdict == "UNSAFE" then "error" else "note" end),
+                  "message": {"text": ("[" + .evaluator + "] " + .detail)},
+                  "locations": [{"physicalLocation": {
+                    "artifactLocation": {"uri": ((.file | cleanfile) // $defaultFile)},
+                    "region": {"startLine": 1}
+                  }}]
+                }))
+              }]
+            }' > results/scan.sarif
+
+          echo "SARIF results: $(jq '.runs[0].results | length' results/scan.sarif)"
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        # Fork PRs lack security-events permission; the scan itself still gates
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results/scan.sarif
+          category: agent-security-quorum
 
       - name: Write job summary
         if: always()
@@ -316,9 +593,9 @@ jobs:
           {
             echo "## Agent/Skill Security Scan"
             echo ""
-            echo "| Evaluator | Model | Verdict |"
-            echo "|-----------|-------|---------|"
-            for lens in security privilege compliance; do
+            echo "| Evaluator | Engine | Verdict |"
+            echo "|-----------|--------|---------|"
+            for lens in security privilege compliance static; do
               FILE="results/${lens}.json"
               if [ -f "$FILE" ]; then
                 V=$(jq -r '.verdict' "$FILE")
@@ -328,8 +605,10 @@ jobs:
                 echo "| ${lens} | — | ⚠️ MISSING |"
               fi
             done
+            GATE="${{ steps.quorum.outputs.gate }}"
+            [ "$GATE" = "success" ] && echo "| test-file gate | deterministic | ✅ PASS |" || echo "| test-file gate | deterministic | ❌ FAIL |"
             echo ""
-            echo "**Quorum: ${{ steps.quorum.outputs.result }}** (${{ steps.quorum.outputs.unsafe }}/3 UNSAFE)"
+            echo "**Quorum: ${{ steps.quorum.outputs.result }}** (${{ steps.quorum.outputs.unsafe }}/4 UNSAFE)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR
@@ -337,15 +616,25 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const result = '${{ steps.quorum.outputs.result }}';
-            const safe = ${{ steps.quorum.outputs.safe }};
-            const unsafe = ${{ steps.quorum.outputs.unsafe }};
+            // Fall back to FAIL if the quorum step never produced an output
+            // (fail-closed: a comment must never imply PASS on an incomplete run)
+            const result = '${{ steps.quorum.outputs.result }}' || 'FAIL';
+            const safe = ${{ steps.quorum.outputs.safe || 0 }};
+            const unsafe = ${{ steps.quorum.outputs.unsafe || 0 }};
+            const gate = '${{ steps.quorum.outputs.gate }}' || 'unknown';
             const icon = result === 'PASS' ? '✅' : '❌';
 
             const fs = require('fs');
-            const lenses = ['security', 'privilege', 'compliance'];
+            const lenses = ['security', 'privilege', 'compliance', 'static'];
             const rows = [];
             const findingsBlocks = [];
+
+            const renderFinding = (f) => {
+              if (typeof f === 'string') return `- ${f}`;
+              const id = f.id || 'UNMAPPED';
+              const file = f.file ? ` \`${f.file}\`` : '';
+              return `- **${id}**${file}: ${f.detail || JSON.stringify(f)}`;
+            };
 
             for (const lens of lenses) {
               try {
@@ -355,7 +644,7 @@ jobs:
                 rows.push(`| ${lens} | ${model} | ${vi} |`);
 
                 if (data.findings && data.findings.length > 0 && data.verdict === 'UNSAFE') {
-                  const items = data.findings.map(f => `- ${f}`).join('\n');
+                  const items = data.findings.map(renderFinding).join('\n');
                   findingsBlocks.push(`**${lens}** (${model}):\n${items}`);
                 }
               } catch {
@@ -363,9 +652,24 @@ jobs:
               }
             }
 
+            rows.push(`| test-file gate | deterministic | ${gate === 'success' ? '✅ PASS' : '❌ FAIL'} |`);
+
+            if (gate !== 'success') {
+              const forbiddenB64 = '${{ needs.test_file_gate.outputs.forbidden }}';
+              const forbidden = Buffer.from(forbiddenB64 || '', 'base64').toString('utf8').trim();
+              if (forbidden) {
+                const items = forbidden.split('\n')
+                  .map(f => `- **AST02** \`${f}\`: forbidden executable file in agent/skill directory`)
+                  .join('\n');
+                findingsBlocks.push(`**test-file gate** (deterministic):\n${items}`);
+              } else {
+                findingsBlocks.push(`**test-file gate** (deterministic):\n- **AST02**: gate did not complete; treat as failed (fail-closed)`);
+              }
+            }
+
             let body = `## ${icon} Agent/Skill Security Scan\n\n`;
-            body += `| Evaluator | Model | Verdict |\n|-----------|-------|---------|\n${rows.join('\n')}\n\n`;
-            body += `**Quorum: ${result}** (${unsafe}/3 UNSAFE)\n`;
+            body += `| Evaluator | Engine | Verdict |\n|-----------|--------|---------|\n${rows.join('\n')}\n\n`;
+            body += `**Quorum: ${result}** (${unsafe}/4 UNSAFE)\n`;
 
             if (findingsBlocks.length > 0) {
               if (result === 'FAIL') {
@@ -404,7 +708,10 @@ jobs:
             }
 
       - name: Fail on UNSAFE quorum
-        if: steps.quorum.outputs.result == 'FAIL'
+        # Fail-closed: fail unless the quorum step explicitly produced PASS.
+        # An empty result means the quorum step was skipped or errored, which
+        # must not merge as a pass under required-check protection.
+        if: steps.quorum.outputs.result != 'PASS'
         run: |
-          echo "❌ Quorum voted UNSAFE — failing build."
+          echo "❌ Quorum did not return PASS (result='${{ steps.quorum.outputs.result }}') — failing build."
           exit 1

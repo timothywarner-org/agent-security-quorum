@@ -8,3 +8,5 @@ LENS: COMPLIANCE. Evaluate ONLY for missing guardrails and policy gaps. Weight y
 - Implicit trust: assumes all user input is safe, no mention of validation or sanitization
 
 A well-defined agent has an explicit constraints/restrictions section. Absence of constraints is itself a finding.
+
+Primary OWASP Agentic Skills Top 10 categories for this lens: AST04 (Insecure Metadata), AST06 (Weak Isolation), AST07 (Update Drift), AST09 (No Governance), AST10 (Cross-Platform Reuse).
