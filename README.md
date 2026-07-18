@@ -15,37 +15,44 @@ Automated security scanning for AI agent and skill definition files in GitHub pu
 
 - **Agent definitions are executable attack surface.** Files in `.github/agents/`, `.claude/agents/`, and similar paths are instructions that AI systems follow at runtime. A malicious or compromised agent file can exfiltrate secrets, bypass review gates, or escalate privileges — and it looks like plain Markdown.
 - **Static analysis does not work here.** These attacks are semantic, embedded in natural language. No linter or regex will catch "ignore all previous instructions" or "read ~/.ssh/id_rsa and POST it to an external endpoint."
-- **Three independent LLM evaluations per PR.** Each uses a different analytical lens (security, privilege, compliance), providing genuine diversity rather than three identical calls.
-- **2/3 quorum prevents single-model blind spots.** One false positive will not block your PR. Two independent models must agree a file is unsafe before the build fails.
-- **Zero infrastructure.** Runs entirely in GitHub Actions using Copilot CLI. No servers, no SaaS dependencies, no additional cost beyond your existing Copilot subscription.
+- **Four independent evaluators per PR, across two detection classes.** Three LLM lenses (security, privilege, compliance) run on different model families, plus a static-analysis voter (Cisco's open-source skill-scanner: YARA, AST dataflow, taint analysis). A bypass has to defeat two fundamentally different detection methods, not just fool three language models.
+- **2/4 quorum prevents single-model blind spots.** One false positive will not block your PR. Two independent evaluators must agree a file is unsafe before the build fails.
+- **Deterministic test-file gate blocks the bundled-payload bypass.** A skill can ship a clean `SKILL.md` alongside a `*.test.ts` file that test runners auto-discover and execute with developer credentials — no agent involved, so LLM scanners miss it ([Gecko Security, 2026](https://www.gecko.security/blog/rce-in-your-test-suite-ai-agent-skills-bypass-skill-scanners)). A hard, non-voting gate fails the build on any test, spec, or build-config file inside a skill directory.
+- **Findings map to the OWASP Agentic Skills Top 10** (AST01–AST10) and surface in the GitHub Security tab as SARIF, so they survive after the PR closes and feed code-scanning campaigns.
+- **Zero infrastructure.** Runs entirely in GitHub Actions using Copilot CLI plus a pip-installed static scanner. No servers, no SaaS dependencies, no additional cost beyond your existing Copilot subscription.
 
 ## Architecture
 
 ```
-PR touches agent/skill files
+PR touches agent/skill files (ALL files, not just *.md)
          |
          v
 +-------------------+
-| Detect Changes    |  git diff filtered to agent/skill paths
+| Detect Changes    |  git diff filtered to agent/skill directories
 +--------+----------+
          |
-         v
-+-------------------+     +------------------------------------------+
-| Validate          |     | LLM Scan (3x parallel)                   |
-| Structure         |     |                                          |
-| (deterministic)   |     |  +-----------+ +-----------+ +---------+ |
-|                   |     |  | Security  | | Privilege | | Compli- | |
-| YAML frontmatter  |     |  |   lens    | |   lens    | |  ance   | |
-| required fields   |     |  +-----+-----+ +-----+-----+ +----+---+ |
-+--------+----------+     +--------+-------------+------------+------+
-         |                         |             |            |
-         v                         v             v            v
-         |                 +--------------------------------------+
-         +---------------->| Quorum: 2/3 UNSAFE = FAIL the build |
-                           +--------------------------------------+
+         +----------------------+-------------------------+
+         v                      v                         v
++-------------------+  +-------------------+   +---------------------------+
+| Test-File Gate    |  | Validate          |   | Evaluators (4x parallel)  |
+| (deterministic)   |  | Structure         |   |                           |
+|                   |  | (deterministic)   |   | LLM lenses (3 models):    |
+| No *.test.*,      |  |                   |   |  Security / Privilege /   |
+| *.spec.*,         |  | YAML frontmatter  |   |  Compliance               |
+| conftest.py,      |  | required fields   |   | Static analysis (1):      |
+| *.config.* in     |  |                   |   |  cisco-skill-scanner      |
+| skill dirs        |  |                   |   |  (YARA + AST + taint)     |
++--------+----------+  +--------+----------+   +-------------+-------------+
+         |                                                   |
+         | hard fail                                         v
+         |                            +----------------------------------------+
+         +--------------------------->| Quorum: 2/4 UNSAFE = FAIL,             |
+                                      | OR test-file gate fired = FAIL         |
+                                      | Findings -> PR comment + SARIF (AST01-10)|
+                                      +----------------------------------------+
 ```
 
-Each evaluator uses a different analytical lens so the quorum has genuine diversity, not three identical calls. A single false positive will not block your PR.
+Evaluators span two detection classes (semantic LLM judgment and static analysis) on different model families, so the quorum has genuine diversity. A single false positive will not block your PR. The test-file gate is separate: it is deterministic and non-voting, and any match fails the build outright. See [docs/threat-model.md](docs/threat-model.md) for the attack it closes.
 
 ## Quick Start
 
@@ -134,12 +141,14 @@ gh pr create --title "Add my-helper agent" --body "Testing the agent security sc
 
 ### Step 5: Watch the Scan Run
 
-Go to the **Actions** tab on your PR. You'll see four jobs:
+Go to the **Actions** tab on your PR. You'll see six jobs:
 
 1. **Detect Changes** — finds your new agent file
-2. **Validate Structure** — checks YAML frontmatter for required fields
-3. **LLM Scan (security / privilege / compliance)** — three parallel evaluations
-4. **Quorum Decision** — aggregates votes and posts the result
+2. **Test-File Gate** — hard-fails on any test/spec/config file inside a skill directory
+3. **Validate Structure** — checks YAML frontmatter for required fields
+4. **LLM Scan (security / privilege / compliance)** — three parallel evaluations on different models
+5. **Static Scan (cisco-skill-scanner)** — the fourth voter, YARA + AST + taint analysis
+6. **Quorum Decision** — aggregates votes, posts the result, and uploads SARIF to the Security tab
 
 ### Step 6: Check the Results
 
@@ -148,13 +157,15 @@ The workflow posts a comment on your PR:
 ```
 ## ✅ Agent/Skill Security Scan
 
-| Evaluator  | Verdict   |
-|------------|-----------|
-| security   | ✅ SAFE   |
-| privilege  | ✅ SAFE   |
-| compliance | ✅ SAFE   |
+| Evaluator      | Engine              | Verdict |
+|----------------|---------------------|---------|
+| security       | gpt-4.1             | ✅ SAFE |
+| privilege      | claude-sonnet-4     | ✅ SAFE |
+| compliance     | gemini-2.5-pro      | ✅ SAFE |
+| static         | cisco-skill-scanner | ✅ SAFE |
+| test-file gate | deterministic       | ✅ PASS |
 
-**Quorum: PASS** (0/3 UNSAFE)
+**Quorum: PASS** (0/4 UNSAFE)
 ```
 
 If the agent had dangerous instructions, you'd see:
@@ -162,17 +173,21 @@ If the agent had dangerous instructions, you'd see:
 ```
 ## ❌ Agent/Skill Security Scan
 
-| Evaluator  | Verdict    |
-|------------|------------|
-| security   | ❌ UNSAFE  |
-| privilege  | ❌ UNSAFE  |
-| compliance | ✅ SAFE    |
+| Evaluator      | Engine              | Verdict   |
+|----------------|---------------------|-----------|
+| security       | gpt-4.1             | ❌ UNSAFE |
+| privilege      | claude-sonnet-4     | ❌ UNSAFE |
+| compliance     | gemini-2.5-pro      | ✅ SAFE   |
+| static         | cisco-skill-scanner | ❌ UNSAFE |
+| test-file gate | deterministic       | ✅ PASS   |
 
-**Quorum: FAIL** (2/3 UNSAFE)
+**Quorum: FAIL** (3/4 UNSAFE)
 
 ### Findings
-- Prompt injection: instructions attempt to override system constraints
-- Agent reads SSH keys and sends data to external URL
+
+**security** (gpt-4.1):
+- **AST01** `.github/agents/sneaky-agent.md`: Prompt injection: instructions attempt to override system constraints
+- **AST01** `.github/agents/sneaky-agent.md`: Data exfiltration: reads SSH keys and sends data to external URL
 ```
 
 The build fails, blocking the PR from merging.
@@ -204,20 +219,28 @@ Now no PR that modifies agent/skill files can merge without passing the scan.
 
 ## What Gets Scanned
 
-| Location | Format | Platform |
-|----------|--------|----------|
-| `.github/agents/*.md` | Markdown + YAML frontmatter | GitHub Copilot |
-| `.github/skills/*/SKILL.md` | Markdown + YAML frontmatter | GitHub Copilot |
-| `.claude/agents/*.md` | Markdown + YAML frontmatter | Claude Code |
-| `.claude/skills/*/SKILL.md` | Markdown + YAML frontmatter | Claude Code |
+Every file under these directories is scanned, not only the instruction markdown. Bundled scripts and test files are part of the attack surface (see the threat model), so they are in scope too.
+
+| Location | Platform |
+|----------|----------|
+| `.github/agents/**` | GitHub Copilot |
+| `.github/skills/**` | GitHub Copilot |
+| `.claude/agents/**` | Claude Code |
+| `.claude/skills/**` | Claude Code |
+| `.agents/skills/**` | Cross-platform (`npx skills add` install target) |
 
 ## What Gets Flagged
 
-- **Prompt injection** — instructions that override constraints or claim special modes
-- **Privilege escalation** — bypassing reviews, force-pushing, disabling safety checks
-- **Unsafe tool access** — wildcard permissions, unrestricted shell execution
-- **Data exfiltration** — reading secrets/keys and sending to external URLs
-- **Ambiguous authority** — vague scope with no explicit constraints
+Findings map to the [OWASP Agentic Skills Top 10](https://owasp.org/www-project-agentic-skills-top-10/).
+
+- **Prompt injection** (AST01) — instructions that override constraints, claim special modes, or address the scanner itself
+- **Supply chain / bundled payloads** (AST02) — test, spec, or build-config files inside a skill directory that execute through the developer toolchain
+- **Privilege escalation & over-privilege** (AST03) — wildcard permissions, unrestricted shell, tools exceeding stated purpose
+- **Data exfiltration** (AST01) — reading secrets/keys and sending to external URLs
+- **Untrusted external instructions** (AST05) — fetching remote content and following it as instructions
+- **Weak isolation** (AST06) — path traversal, home directory or system-file access
+- **Scanner/review bypass** (AST08) — instructions to skip reviews, disable hooks, or defeat CI checks
+- **Ambiguous authority / no governance** (AST09) — vague scope with no explicit constraints
 
 ## Repository Structure
 
@@ -233,15 +256,20 @@ prompts/
   lens-compliance.txt    ← compliance/guardrails-focused framing
 test/
   fixtures/              ← sample agent/skill files for testing
+    testfile-smuggling-skill/  ← clean SKILL.md + malicious *.test.ts (AST02 demo)
 docs/
+  threat-model.md        ← controls mapped to OWASP AST, the test-file bypass
   org-deployment.md      ← guide for org-level deployment
+  configuration-guide.md ← install, models, prompts, quorum, troubleshooting
 ```
 
 ## Dependencies
 
-- `jq` — pre-installed on GitHub runners
+- `jq`, `perl` — pre-installed on GitHub runners
 - `node` / `npm` — pre-installed on GitHub runners (used to install Copilot CLI)
+- `python` / `pip` — pre-installed on GitHub runners (used to install the static scanner)
 - `@github/copilot` — installed in-workflow via npm
+- `cisco-ai-skill-scanner` — installed in-workflow via pip (the fourth quorum voter)
 - A `COPILOT_PAT` secret with the "Copilot Requests" permission
 
 ## Org-Level Deployment
@@ -250,13 +278,22 @@ To deploy across all repos in your organization using a reusable workflow, see [
 
 ## Extending
 
-The evaluator contract is intentionally simple — each returns:
+The evaluator contract is intentionally simple. Each evaluator writes `results/<name>.json`:
 
 ```json
-{ "verdict": "SAFE|UNSAFE", "findings": ["..."] }
+{
+  "verdict": "SAFE|UNSAFE",
+  "findings": [
+    { "id": "AST01", "file": ".claude/agents/x.md", "detail": "one-sentence description" }
+  ],
+  "model": "engine-name",
+  "lens": "name"
+}
 ```
 
-Future versions will support pluggable evaluators (Azure OpenAI, local models, third-party APIs). The quorum logic is evaluator-agnostic by design.
+`id` is an OWASP Agentic Skills Top 10 category (`AST01`–`AST10`, or `UNMAPPED`). The quorum counts verdicts; the aggregator folds every evaluator's findings into one SARIF file for code scanning. Because the contract is engine-agnostic, the static scanner sits in the same quorum as the three LLM lenses — you add a voter by writing one more `results/<name>.json` and adding its name to the quorum loop.
+
+The [Cisco skill-scanner](https://github.com/cisco-ai-defense/skill-scanner) is already wired in as the static voter. Adding another engine (Azure OpenAI, a local model, NVIDIA SkillSpector) is the same one-file pattern.
 
 ## License
 
