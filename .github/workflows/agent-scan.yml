@@ -9,10 +9,24 @@ on:
       - ".claude/skills/**"
       - ".agents/skills/**"
 
+# Least privilege by default: every job can only read. The one job that
+# writes (aggregate) asks for its extra permissions itself, so the jobs that
+# install third-party packages never hold a write-capable token.
 permissions:
   contents: read
-  pull-requests: write
-  security-events: write
+
+# One scan per PR: a newer push cancels the older run so a stale result can
+# never overwrite the PR comment after a newer one lands.
+concurrency:
+  group: agent-scan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Pinned tool versions, in one place. A security gate must behave the same
+# on every run; "latest" means an upstream release can change the verdict.
+# The weekly copilot-probe workflow reads these values too.
+env:
+  COPILOT_CLI_VERSION: "1.0.86"
+  SKILL_SCANNER_VERSION: "2.1.0"
 
 jobs:
   # ──────────────────────────────────────────────
@@ -29,15 +43,21 @@ jobs:
       has_changes: ${{ steps.detect.outputs.has_changes }}
       changed_files: ${{ steps.detect.outputs.changed_files }}
     steps:
+      # persist-credentials: false (on every checkout in this file) keeps the
+      # job token out of .git/config, where installed tools could read it
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Find changed agent/skill files
         id: detect
         run: |
-          # --diff-filter=d excludes deletions: a removed file cannot carry a payload
-          FILES=$(git diff --name-only --diff-filter=d ${{ github.event.pull_request.base.sha }}...HEAD -- \
+          # --diff-filter=d excludes deletions: a removed file cannot carry a payload.
+          # core.quotePath=false keeps git from wrapping non-ASCII names in
+          # escaped quotes ("pr\303\251view.md"); a quoted name fails the
+          # file-exists check downstream and would skip the file entirely.
+          FILES=$(git -c core.quotePath=false diff --name-only --diff-filter=d ${{ github.event.pull_request.base.sha }}...HEAD -- \
             '.github/agents' \
             '.github/skills' \
             '.claude/agents' \
@@ -73,6 +93,8 @@ jobs:
       forbidden: ${{ steps.gate.outputs.forbidden }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Block executable payloads in agent/skill directories
         id: gate
@@ -120,6 +142,8 @@ jobs:
     if: needs.detect_changes.outputs.has_changes == 'true'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Validate YAML frontmatter
         run: |
@@ -170,7 +194,11 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Job 4: LLM evaluation (3x parallel via matrix)
-  #   Uses GitHub Copilot CLI in programmatic mode
+  #   Uses GitHub Copilot CLI in programmatic mode.
+  #   One model per vendor (OpenAI, Anthropic,
+  #   Google) so the three votes are not the same
+  #   model three times. Model IDs retire: the
+  #   weekly copilot-probe workflow checks them.
   # ──────────────────────────────────────────────
   llm_scan:
     name: "LLM Scan (${{ matrix.lens }} / ${{ matrix.model }})"
@@ -181,20 +209,24 @@ jobs:
       matrix:
         include:
           - lens: security
-            model: gpt-4.1
+            model: gpt-5.5
           - lens: privilege
-            model: claude-sonnet-4
+            model: claude-sonnet-5
           - lens: compliance
-            model: gemini-2.5-pro
+            model: gemini-3.7-flash
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
 
       - name: Install Copilot CLI
-        run: npm install -g @github/copilot
+        run: |
+          npm install -g "@github/copilot@${COPILOT_CLI_VERSION}"
+          copilot --version
 
       - name: "Evaluate: ${{ matrix.lens }} lens via ${{ matrix.model }}"
         run: |
@@ -206,9 +238,15 @@ jobs:
           # untrusted-content markers so a malicious file cannot pose as
           # instructions to the evaluator (prompt injection at scan time).
           FILE_CONTENTS=""
+          UNREADABLE=""
           while IFS= read -r file; do
             [ -z "$file" ] && continue
-            [ ! -f "$file" ] && continue
+            # A changed file the scanner cannot open is a file it cannot vouch
+            # for. Record it and fail closed below; never skip it silently.
+            if [ ! -f "$file" ]; then
+              UNREADABLE+="${file} "
+              continue
+            fi
             # grep -I treats binary as no-match: binary blobs pollute the prompt
             if ! grep -qI . "$file"; then
               FILE_CONTENTS+="=== SKIPPED (binary or empty): ${file} ==="$'\n\n'
@@ -222,6 +260,16 @@ jobs:
             FILE_CONTENTS+="=== END UNTRUSTED FILE: ${file} ==="$'\n\n'
           done <<< "$FILES"
 
+          MODEL="${{ matrix.model }}"
+          if [ -n "$UNREADABLE" ]; then
+            echo "FAIL-SAFE: could not read changed file(s): ${UNREADABLE}. Voting UNSAFE."
+            jq -n --arg m "$MODEL" --arg l "$LENS" --arg f "$UNREADABLE" \
+              '{verdict:"UNSAFE",findings:[{id:"AST08",file:null,detail:("Scanner could not read changed file(s): " + $f)}],model:$m,lens:$l,error:true}' \
+              > "results/${LENS}.json"
+            cat "results/${LENS}.json"
+            exit 0
+          fi
+
           # Load prompts
           LENS_PROMPT=$(cat "prompts/lens-${LENS}.txt")
           BASE_PROMPT=$(cat "prompts/v1.txt")
@@ -232,28 +280,31 @@ jobs:
           # Write prompt to temp file to avoid shell escaping issues
           echo "$FULL_PROMPT" > /tmp/prompt.txt
 
-          # Call Copilot CLI in programmatic mode
-          # --output-format json returns JSONL (one JSON event per line)
-          MODEL="${{ matrix.model }}"
+          # The CLI loads project config (agents, skills, hooks, MCP servers,
+          # AGENTS.md-style instructions) from its working directory. The
+          # checkout IS the untrusted PR, so run from an empty folder outside
+          # it, with a fresh config home. The PR's files reach the model only
+          # as text inside the prompt, never as configuration.
+          ANALYZER_DIR="$RUNNER_TEMP/asq-analyzer"
+          mkdir -p "$ANALYZER_DIR"
+          export COPILOT_HOME="$RUNNER_TEMP/asq-copilot-home"
+
+          # --output-format json returns JSONL (one JSON event per line).
+          # The analyzer needs no tools: everything it judges is in the prompt.
+          # No fallback to the default model: a voter that cannot run its own
+          # model must not quietly become a copy of another voter. A rejected
+          # model yields no verdict, and the fail-safe below votes UNSAFE.
           set +e
-          copilot -p "$(cat /tmp/prompt.txt)" \
-            --model "$MODEL" \
-            --output-format json \
-            --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
+          ( cd "$ANALYZER_DIR" && copilot -p "$(cat /tmp/prompt.txt)" \
+              --model "$MODEL" \
+              --output-format json \
+              --no-ask-user \
+              --no-custom-instructions \
+              --disable-builtin-mcps \
+              --deny-tool=shell \
+              --deny-tool=write ) > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
           EXIT_CODE=$?
           set -e
-
-          # If model flag failed, retry without it (uses default model)
-          if [ "$EXIT_CODE" -ne 0 ] && grep -qi "not available\|unknown model\|invalid model" /tmp/copilot-stderr.txt 2>/dev/null; then
-            echo "Model '$MODEL' not available — retrying with default model..."
-            MODEL="default"
-            set +e
-            copilot -p "$(cat /tmp/prompt.txt)" \
-              --output-format json \
-              --no-ask-user > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
-            EXIT_CODE=$?
-            set -e
-          fi
 
           echo "Copilot CLI exit code: $EXIT_CODE (model: $MODEL)"
           if [ -s /tmp/copilot-stderr.txt ]; then
@@ -352,6 +403,8 @@ jobs:
     if: needs.detect_changes.outputs.has_changes == 'true'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -359,9 +412,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install Cisco skill-scanner
-        # Pin to a validated version in production; unpinned here so the
-        # teaching repo tracks upstream detection improvements
-        run: pip install cisco-ai-skill-scanner
+        # Pinned (see workflow env): the verdict logic below parses this
+        # version's JSON, so an upgrade is a deliberate, tested change
+        run: pip install "cisco-ai-skill-scanner==${SKILL_SCANNER_VERSION}"
 
       - name: Scan agent/skill directories
         run: |
@@ -440,10 +493,18 @@ jobs:
   aggregate:
     name: Quorum Decision
     runs-on: ubuntu-latest
+    # The only job that writes: it comments on the PR and uploads SARIF.
+    # It installs nothing and runs no model, so it can hold these safely.
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
     needs: [detect_changes, test_file_gate, validate_structure, llm_scan, static_scan]
     if: always() && needs.detect_changes.outputs.has_changes == 'true'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download all evaluation results
         uses: actions/download-artifact@v4
@@ -558,7 +619,7 @@ jobs:
               "runs": [{
                 "tool": {"driver": {
                   "name": "agent-security-quorum",
-                  "informationUri": "https://github.com/timothywarner/agent-security-quorum",
+                  "informationUri": "https://github.com/timothywarner-org/agent-security-quorum",
                   "rules": ([$findings[].id] | unique | map({
                     "id": .,
                     "shortDescription": {"text": ("OWASP Agentic Skills " + . + ": " + ($titles[.] // "Agent security finding"))}
@@ -679,7 +740,7 @@ jobs:
               }
             }
 
-            body += `\n---\n*Scanned by [agent-security-quorum](https://github.com/timothywarner/agent-security-quorum)*`;
+            body += `\n---\n*Scanned by [agent-security-quorum](https://github.com/timothywarner-org/agent-security-quorum)*`;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,

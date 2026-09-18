@@ -1,0 +1,107 @@
+# Weekly check that the scanner's Copilot access still works.
+#
+# The scanner has two ways to break without anyone noticing: the COPILOT_PAT
+# secret expires, or GitHub retires a model ID listed in agent-scan.yml.
+# Either one turns every LLM vote into a fail-safe UNSAFE, and nobody finds
+# out until an agent PR is blocked. This probe fails loudly instead: GitHub
+# emails a failed scheduled run to the person who last edited the schedule.
+#
+# Note: GitHub disables scheduled workflows in public repos after 60 days
+# without repository activity. Re-enable it from the Actions tab if needed.
+name: Copilot Access Probe
+
+on:
+  schedule:
+    - cron: "0 13 * * 1" # Mondays, 13:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Copilot Access Probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check the COPILOT_PAT token
+        env:
+          TOKEN: ${{ secrets.COPILOT_PAT }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "FAIL: the COPILOT_PAT secret is missing or empty"
+            exit 1
+          fi
+
+          # The GitHub API answers 401 for an expired or revoked token. For a
+          # token with an expiry date, it also returns that date in a header,
+          # so the probe can warn before the token dies instead of after.
+          CODE=$(curl -sS -o /dev/null -D /tmp/headers.txt -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" https://api.github.com/user)
+          echo "GitHub API status: $CODE"
+          if [ "$CODE" = "401" ]; then
+            echo "FAIL: COPILOT_PAT is expired, revoked, or invalid. Rotate it."
+            exit 1
+          fi
+
+          EXP=$(grep -i '^github-authentication-token-expiration:' /tmp/headers.txt | cut -d' ' -f2- | tr -d '\r')
+          if [ -z "$EXP" ]; then
+            echo "Token expiration: none reported"
+            exit 0
+          fi
+          DAYS_LEFT=$(( ( $(date -d "$EXP" +%s) - $(date +%s) ) / 86400 ))
+          echo "Token expiration: $EXP ($DAYS_LEFT days left)"
+          # 14 days = two weekly runs of warning before the token expires
+          if [ "$DAYS_LEFT" -lt 14 ]; then
+            echo "FAIL: COPILOT_PAT expires in $DAYS_LEFT days. Rotate it now."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+
+      - name: Install the pinned Copilot CLI
+        run: |
+          # Read the version from agent-scan.yml so the probe tests exactly
+          # what the scanner runs: one source of truth, nothing to drift
+          VERSION=$(yq '.env.COPILOT_CLI_VERSION' .github/workflows/agent-scan.yml)
+          npm install -g "@github/copilot@${VERSION}"
+          copilot --version
+
+      - name: Check every configured model still answers
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
+        run: |
+          # Same isolation and flags as the real scan (see agent-scan.yml)
+          mkdir -p "$RUNNER_TEMP/probe"
+          export COPILOT_HOME="$RUNNER_TEMP/probe-home"
+          FAILED=0
+
+          for MODEL in $(yq '.jobs.llm_scan.strategy.matrix.include[].model' .github/workflows/agent-scan.yml); do
+            set +e
+            ( cd "$RUNNER_TEMP/probe" && copilot -p "Reply with exactly the word OK and nothing else." \
+                --model "$MODEL" \
+                --output-format json \
+                --no-ask-user \
+                --no-custom-instructions \
+                --disable-builtin-mcps \
+                --deny-tool=shell \
+                --deny-tool=write ) > /tmp/out.jsonl 2>/tmp/err.txt
+            EXIT=$?
+            set -e
+
+            if [ "$EXIT" -eq 0 ] && [ -s /tmp/out.jsonl ]; then
+              echo "OK:   $MODEL"
+            else
+              echo "FAIL: $MODEL (exit $EXIT)"
+              cat /tmp/err.txt
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more models failed. If the token check passed, update the model IDs in agent-scan.yml."
+            exit 1
+          fi
