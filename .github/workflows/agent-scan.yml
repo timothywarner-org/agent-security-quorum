@@ -319,23 +319,14 @@ jobs:
           echo "Event types:"
           jq -r '.type // "no-type"' /tmp/copilot-output.jsonl 2>/dev/null | sort | uniq -c | sort -rn || true
 
-          # --- Extract text from JSONL event stream ---
-          # Broad selector: grab any string from .data fields regardless of key name
-          TEXT=$(jq -r '
-            select(.data != null) | .data |
-            if type == "string" then .
-            elif type == "object" then
-              (.content // .text // .message // .delta // .body // empty) |
-              if type == "array" then .[] | (.text // .content // empty)
-              elif type == "string" then .
-              else empty end
-            else empty end
-          ' /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
-
-          # Fallback: recursive string extraction from all fields
-          if [ -z "$TEXT" ]; then
-            TEXT=$(jq -r '.. | strings' /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
-          fi
+          # --- Extract the model's reply from the JSONL event stream ---
+          # Read ONLY assistant.message events. The stream also echoes the
+          # prompt back (user.message), and the prompt contains a SAFE example
+          # verdict: reading every string made every voter "vote" SAFE no
+          # matter what the model said. No reply means no verdict, and the
+          # fail-safe below votes UNSAFE.
+          TEXT=$(jq -r 'select(.type == "assistant.message") | .data.content // empty' \
+            /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
 
           echo "Extracted text: $(echo "$TEXT" | wc -c) chars"
 
@@ -426,7 +417,9 @@ jobs:
           for root in .github/agents .github/skills .claude/agents .claude/skills .agents/skills; do
             [ -d "$root" ] || continue
             DIRS_PRESENT=$((DIRS_PRESENT + 1))
-            OUT="${RAW_DIR}/$(echo "$root" | tr '/' '-').json"
+            # "scan" prefix: every root starts with a dot, and a dot-named file
+            # is invisible to the *.json glob below (it silently read nothing)
+            OUT="${RAW_DIR}/scan$(echo "$root" | tr '/' '-').json"
             # --lenient accepts non-standard layouts (Claude Code agents are
             # bare .md files, not SKILL.md packages). The tool's exit code is
             # informational here: findings decide the vote, the quorum decides
@@ -447,7 +440,9 @@ jobs:
 
           RAW_FILES=$(ls "$RAW_DIR"/*.json 2>/dev/null || true)
 
-          if [ "$SCANNED" -gt 0 ]; then
+          # Scanned but found no report files to read: falls through to the
+          # fail-closed branch. Empty input must never mean SAFE.
+          if [ "$SCANNED" -gt 0 ] && [ -n "$RAW_FILES" ]; then
             # Best-effort normalization: the JSON schema is Cisco's, not ours,
             # so recursively collect anything carrying a severity field and map
             # it onto the shared evaluator contract. Critical/high = UNSAFE.
