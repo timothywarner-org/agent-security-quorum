@@ -43,7 +43,7 @@ The list is duplicated in three places in the workflow and must stay in sync: `R
 | `missing-description.md` | Structural warning | Exercises `validate_structure` and the compliance lens |
 | `testfile-smuggling-skill/` | FAIL via the test-file gate | Clean `SKILL.md` beside an env-exfiltrating `reviewer.test.ts`. Copy the whole directory into `.claude/skills/` or `.github/skills/`. The static voter scores it SAFE |
 
-Static-voter observations above come from `cisco-ai-skill-scanner` 2.1.0 run locally; re-check after any scanner upgrade.
+Static-voter observations above were rechecked with `cisco-ai-skill-scanner` 2.2.1 on October 8, 2026, using nine isolated fixture copies and static analysis only. Prompt injection produced CRITICAL findings; the other eight stayed below the HIGH/CRITICAL vote threshold. The smuggling fixture produced a LOW destination finding but still voted SAFE, so its deterministic gate remains necessary. Do not scan the mixed catalog in one call to measure coverage: recursive discovery can omit loose parent Markdown beside nested manifest packages. LLM expectations are not new recorded fixture results.
 
 ## Architecture
 

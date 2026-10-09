@@ -509,7 +509,7 @@ jobs:
             # Partial analyzer failure or skipped packages are incomplete evidence.
             if [ "$EXIT_CODE" -ne 0 ] || ! jq -e '
               type == "object" and (.summary | type == "object") and
-              (.results | type == "array") and
+              (.results | type == "array" and length > 0) and
               ((.summary.skills_skipped // [] | length) == 0) and
               all(.results[]; (.findings | type == "array") and
                 ((.analyzers_failed // [] | length) == 0))

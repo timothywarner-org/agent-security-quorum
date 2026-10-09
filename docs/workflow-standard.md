@@ -52,6 +52,8 @@ Require **Quorum Decision** and code-owner approval in repository rules if they 
 
 Analyzer package versions are exact, but their transitive package dependencies are resolved during installation. That is not a fully locked software supply chain. The Actions workflow remains a compact teaching example, not an attested build environment or a runtime sandbox.
 
+Cisco 2.2.1's recursive discovery can omit loose Markdown in a parent folder containing a nested manifest-based skill. Keep agent definitions flat and skill packages separate, as the samples do. Scan fixtures individually when comparing detection results; one scan of the mixed fixture catalog does not establish coverage of every file. A completed directory report is not proof that every possible layout was inspected.
+
 ## First-party guidance
 
 - [GitHub Actions secure use reference](https://docs.github.com/en/actions/reference/security/secure-use): least privilege, SHA pinning, untrusted input, CODEOWNERS, dependency maintenance.

@@ -6,13 +6,15 @@
 
 | Beat | Evidence | What it establishes |
 |---|---|---|
-| Harmless change | [Baseline results on PR #4](https://github.com/timothywarner-org/agent-security-quorum/pull/4#issuecomment-6071680881), including the exact run link | Four valid SAFE results, no evaluation errors, and the file gate passing on the first October 8 baseline |
+| Harmless change | [Stable-version baseline, October 8, 2026](https://github.com/timothywarner-org/agent-security-quorum/actions/runs/37865680984) and [latest PR #4 results](https://github.com/timothywarner-org/agent-security-quorum/pull/4#issuecomment-6071680881) | Four valid SAFE results, no evaluation errors, and the file gate passing on commit 94e1b8f; the comment may point to a newer run |
 | Risky change | [Four-voter rehearsal, September 19, 2026](https://github.com/timothywarner-org/agent-security-quorum/actions/runs/35445419741) and [PR #3 findings](https://github.com/timothywarner-org/agent-security-quorum/pull/3#issuecomment-5737262335) | Four UNSAFE votes and a separate test-file gate failure on commit ee80d84 |
 | Operational dependency | [Access probe, October 8, 2026](https://github.com/timothywarner-org/agent-security-quorum/actions/runs/37864270825) | Token was accepted, but its October 18 expiration triggered the 14-day maintenance threshold; model checks were skipped |
 
 The September run predates ERROR reporting and uses the older phrase **Merge blocked**. Treat that as a historical scanner verdict. On October 8, the GitHub API reported no rulesets and an unprotected main branch, so that wording does not establish enforced merge protection.
 
 The first October 8 baseline is preserved as [run 37864262324](https://github.com/timothywarner-org/agent-security-quorum/actions/runs/37864262324), commit **22e220d**. All four downloaded result artifacts reported SAFE, without an error flag. The static voter also recorded one informational license finding. PR #4's comment updates on subsequent runs, so read its commit and run footer before presenting. Follow-up workflow changes pin the runner and update existing Actions to Node 24 releases to remove the deprecation notices visible in the first baseline.
+
+The stable-version baseline above completed in **1 minute 35 seconds**, selected all four tracked targets, and confirmed Copilot CLI **1.0.94**, Cisco scanner **2.2.1**, Node **24.21.0**, and Python **3.14.8** in its logs. Its four downloaded artifacts reported SAFE without errors; one static informational finding remains. This establishes the named run's behavior, not detection accuracy across all fixtures.
 
 ## Nine-minute route
 
