@@ -22,16 +22,19 @@ jobs:
   probe:
     name: Copilot Access Probe
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Check the COPILOT_PAT token
+        id: token
         env:
           TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           if [ -z "$TOKEN" ]; then
+            echo "## ERROR: Copilot token is missing" >> "$GITHUB_STEP_SUMMARY"
             echo "FAIL: the COPILOT_PAT secret is missing or empty"
             exit 1
           fi
@@ -42,20 +45,28 @@ jobs:
           CODE=$(curl -sS -o /dev/null -D /tmp/headers.txt -w '%{http_code}' \
             -H "Authorization: Bearer $TOKEN" https://api.github.com/user)
           echo "GitHub API status: $CODE"
-          if [ "$CODE" = "401" ]; then
-            echo "FAIL: COPILOT_PAT is expired, revoked, or invalid. Rotate it."
+          # An API error must not be mistaken for a token with no expiry.
+          if [ "$CODE" != "200" ]; then
+            echo "## ERROR: token check returned HTTP $CODE" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL: cannot validate COPILOT_PAT (HTTP $CODE). Check token validity and service availability."
             exit 1
           fi
 
-          EXP=$(grep -i '^github-authentication-token-expiration:' /tmp/headers.txt | cut -d' ' -f2- | tr -d '\r')
+          EXP=$(grep -i '^github-authentication-token-expiration:' /tmp/headers.txt | cut -d' ' -f2- | tr -d '\r' || true)
           if [ -z "$EXP" ]; then
             echo "Token expiration: none reported"
+            echo "## Token accepted; no expiration reported" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           DAYS_LEFT=$(( ( $(date -d "$EXP" +%s) - $(date +%s) ) / 86400 ))
           echo "Token expiration: $EXP ($DAYS_LEFT days left)"
+          {
+            echo "## Copilot access maintenance"
+            echo "Token accepted by GitHub. Expiration: **$EXP** ($DAYS_LEFT days remaining at this run)."
+          } >> "$GITHUB_STEP_SUMMARY"
           # 14 days = two weekly runs of warning before the token expires
           if [ "$DAYS_LEFT" -lt 14 ]; then
+            echo "**ACTION REQUIRED:** rotate the repository secret COPILOT_PAT before expiration. This run stops at the maintenance warning, so it does not test model availability." >> "$GITHUB_STEP_SUMMARY"
             echo "FAIL: COPILOT_PAT expires in $DAYS_LEFT days. Rotate it now."
             exit 1
           fi
@@ -78,6 +89,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/probe"
           export COPILOT_HOME="$RUNNER_TEMP/probe-home"
           FAILED=0
+          printf '\n| Requested model | Reply check |\n|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
 
           for MODEL in $(yq '.jobs.llm_scan.strategy.matrix.include[].model' .github/workflows/agent-scan.yml); do
             set +e
@@ -92,10 +104,14 @@ jobs:
             EXIT=$?
             set -e
 
-            if [ "$EXIT" -eq 0 ] && [ -s /tmp/out.jsonl ]; then
+            # A nonempty event stream can contain only the echoed user prompt.
+            # Require an actual assistant reply, just as the scanner does.
+            if [ "$EXIT" -eq 0 ] && jq -se 'any(.[]; .type == "assistant.message" and ((.data.content // "" | gsub("^\\s+|\\s+$"; "")) == "OK"))' /tmp/out.jsonl >/dev/null 2>&1; then
               echo "OK:   $MODEL"
+              echo "| $MODEL | PASS: assistant replied OK |" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "FAIL: $MODEL (exit $EXIT)"
+              echo "| $MODEL | ERROR: no valid OK reply |" >> "$GITHUB_STEP_SUMMARY"
               cat /tmp/err.txt
               FAILED=1
             fi

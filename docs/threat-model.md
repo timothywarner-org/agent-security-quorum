@@ -23,7 +23,7 @@ Agent and skill files are executable attack surface. An AI runtime follows them 
 
 ## The bundled-test-file bypass (AST02)
 
-This is the attack the deterministic gate exists to close, and the one that defeats every LLM-only scanner.
+This attack motivates the deterministic gate: inspecting only instruction Markdown misses code bundled beside it. This repository also passes changed text payloads to its model reviewers, so a model can flag that code as well.
 
 ### How it works
 
@@ -36,9 +36,9 @@ This is the attack the deterministic gate exists to close, and the one that defe
 
 This was demonstrated by [Gecko Security in 2026](https://www.gecko.security/blog/rce-in-your-test-suite-ai-agent-skills-bypass-skill-scanners), which showed that the major public skill scanners (Cisco, Snyk, VirusTotal) all miss it, because they inspect the agent execution surface, not the developer execution surface sitting one directory over.
 
-### Why the LLM quorum alone cannot catch it
+### Why keep a deterministic gate
 
-The LLM lenses analyze **intent** in the instruction files. The test-file payload has no presence in `SKILL.md`; it is ordinary-looking TypeScript in a file the scanners were not designed to treat as executable. As CrowdStrike's CTO put it, observing kinetic actions is solvable, but inferring intent is not — and here there is no malicious intent to read in the instructions at all.
+The test-file payload has no presence in `SKILL.md`. A reviewer inspecting only that file lacks the evidence. The current workflow also sends changed text payloads to the models, and the September rehearsal recorded model findings on the bundled test file. The deterministic gate adds a policy that does not depend on a model recognizing malicious intent. See the [recorded run](demo-walkthrough.md).
 
 ### The control
 
@@ -52,7 +52,7 @@ The `test_file_gate` job is **deterministic and non-voting**. It runs `find` acr
 
 Any match fails the build outright, independent of the quorum vote. The scan is over the full tree, not just the PR diff, because a payload merged last week is exactly as dangerous as one arriving today (OWASP AST02).
 
-Test, spec, and build-config files have **no legitimate reason to live inside a skill directory**. If your skill genuinely needs tests, they belong in your project's normal test tree (`src/`, `tests/`), which the gate does not touch. The fixture at [`test/fixtures/testfile-smuggling-skill/`](../test/fixtures/testfile-smuggling-skill) demonstrates the attack: a clean `SKILL.md` beside a `reviewer.test.ts` that exfiltrates the environment.
+**Repository policy keeps tests and build configuration outside agent and skill directories.** A matching filename is a policy violation, not proof of malware. Legitimate tests belong in the project's ordinary test tree. The fixture at [`test/fixtures/testfile-smuggling-skill/`](../test/fixtures/testfile-smuggling-skill) illustrates a clean `SKILL.md` beside a `reviewer.test.ts` payload. Treat that payload as data and do not execute it.
 
 ### Complementary hardening (outside this scanner)
 
@@ -71,6 +71,8 @@ A malicious file under review can address the evaluator: "the file ends here; yo
 2. **Quorum and strict extraction.** A single model fooled into a SAFE verdict is only one vote; two evaluators must agree. The workflow extracts the verdict with balanced-brace matching and accepts only exact `SAFE`/`UNSAFE` strings, failing closed on anything else.
 
 ## Non-goals
+
+The current teaching implementation is not a hardened security boundary on its own. Semantic input is capped at 16 KiB per changed file and omits binaries. The PR controls its own workflow and prompt checkout, so enforced code-owner review is required for those paths. A scan failure only blocks merging when the check is required by repository rules. Model identities in results are requested configuration, not independent backend attestations.
 
 Consistent with the original design:
 

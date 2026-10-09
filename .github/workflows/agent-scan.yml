@@ -1,4 +1,5 @@
 name: Agent/Skill Security Scan
+run-name: "PR #${{ github.event.pull_request.number }} | ${{ github.event.pull_request.title }}"
 
 on:
   pull_request:
@@ -118,9 +119,10 @@ jobs:
               echo "### ❌ Hard stop: test-file gate FAILED"
               echo ""
               echo "Executable payload files found inside agent/skill directories."
-              echo "Test files, spec files, conftest.py, and build configs have no"
-              echo "legitimate reason to exist there. Test runners auto-discover and"
-              echo "execute them with full developer credentials (OWASP AST02)."
+              echo "Repository policy keeps test, spec, and build-config files outside"
+              echo "these folders because development tools may discover and execute"
+              echo "them with developer credentials (OWASP AST02). A match is a policy"
+              echo "violation; it does not by itself prove malicious behavior."
               echo ""
               echo '```'
               printf '%s' "$FORBIDDEN"
@@ -209,6 +211,7 @@ jobs:
   llm_scan:
     name: "Vote: ${{ matrix.lens }} lens (${{ matrix.vendor }} ${{ matrix.model }})"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: detect_changes
     if: needs.detect_changes.outputs.has_changes == 'true'
     strategy:
@@ -302,7 +305,7 @@ jobs:
           # The analyzer needs no tools: everything it judges is in the prompt.
           # No fallback to the default model: a voter that cannot run its own
           # model must not quietly become a copy of another voter. A rejected
-          # model yields no verdict, and the fail-safe below votes UNSAFE.
+          # model yields no verdict, and its error result fails the decision.
           set +e
           ( cd "$ANALYZER_DIR" && copilot -p "$(cat /tmp/prompt.txt)" \
               --model "$MODEL" \
@@ -336,7 +339,7 @@ jobs:
           # prompt back (user.message), and the prompt contains a SAFE example
           # verdict: reading every string made every voter "vote" SAFE no
           # matter what the model said. No reply means no verdict, and the
-          # fail-safe below votes UNSAFE.
+          # fail-safe below emits an error result.
           TEXT=$(jq -r 'select(.type == "assistant.message") | .data.content // empty' \
             /tmp/copilot-output.jsonl 2>/dev/null | tr -d '\0')
 
@@ -355,7 +358,8 @@ jobs:
           #     {id: AST01..AST10|UNMAPPED, file, detail}
           #     String findings from older prompts are tolerated and wrapped.
           PARSED=""
-          if [ -n "$VERDICT_JSON" ] && echo "$VERDICT_JSON" | jq -e '.verdict' > /dev/null 2>&1; then
+          # A partial answer from a failed process cannot authorize a pass.
+          if [ "$EXIT_CODE" -eq 0 ] && [ -n "$VERDICT_JSON" ] && echo "$VERDICT_JSON" | jq -e '.verdict' > /dev/null 2>&1; then
             V=$(echo "$VERDICT_JSON" | jq -r '.verdict')
             if [ "$V" = "SAFE" ] || [ "$V" = "UNSAFE" ]; then
               echo "$VERDICT_JSON" | jq --arg m "$MODEL" --arg l "$LENS" '{
@@ -396,12 +400,12 @@ jobs:
           # states its verdict, its engine, and its reasons in plain words
           FILE="results/${LENS}.json"
           if [ ! -f "$FILE" ]; then
-            echo "### ⚠️ ${LENS} lens: no result (counts as UNSAFE)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ⚠️ ERROR: ${LENS} lens produced no result; scan must fail" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           jq -r --arg vendor "$VENDOR" '
-            "### \(if .verdict == "SAFE" then "✅" else "❌" end) \(.lens) lens voted \(.verdict)",
-            "Engine: \($vendor) `\(.model)`\(if .error then " (fail-safe: no valid answer, so it votes UNSAFE)" else "" end)",
+            "### \(if .error then "⚠️ ERROR" else .verdict end): \(.lens) lens",
+            "Requested engine: \($vendor) `\(.model)`\(if .error then " (no valid answer; the scan must fail)" else "" end)",
             "",
             (.findings[]? | "- **\(.id)** `\(.file // "n/a")`: \(.detail)")
           ' "$FILE" >> "$GITHUB_STEP_SUMMARY"
@@ -424,6 +428,7 @@ jobs:
   static_scan:
     name: "Vote: static analysis (Cisco skill-scanner)"
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: detect_changes
     if: needs.detect_changes.outputs.has_changes == 'true'
     steps:
@@ -484,7 +489,7 @@ jobs:
                            | select(. == "critical" or . == "high")] | length' $RAW_FILES)
             FINDINGS=$(jq -s '[.. | objects | select(.severity? != null)
               | {id: "UNMAPPED",
-                 file: (.file // .path // .skill // null),
+                 file: (.file // .file_path // .path // .skill // null),
                  detail: ((.severity | tostring | ascii_downcase) + ": "
                           + (.title // .message // .description // .rule_id // "static analysis finding"))}]
               | unique | .[0:30]' $RAW_FILES)
@@ -511,11 +516,11 @@ jobs:
           # Same story format as the three AI voters, for the run summary page
           FILE="results/static.json"
           if [ ! -f "$FILE" ]; then
-            echo "### ⚠️ static analysis: no result (counts as UNSAFE)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ⚠️ ERROR: static analysis produced no result; scan must fail" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           jq -r '
-            "### \(if .verdict == "SAFE" then "✅" else "❌" end) static analysis voted \(.verdict)",
+            "### \(if .error then "⚠️ ERROR" else .verdict end): static analysis",
             "Engine: Cisco `\(.model)` (pattern rules and code-flow analysis, no AI)\(if .error then ", fail-safe: no usable output" else "" end)",
             "",
             (.findings[]? | "- \(.detail)")
@@ -545,13 +550,15 @@ jobs:
       pull-requests: write
       security-events: write
     needs: [detect_changes, test_file_gate, validate_structure, llm_scan, static_scan]
-    if: always() && needs.detect_changes.outputs.has_changes == 'true'
+    if: always() && (needs.detect_changes.outputs.has_changes == 'true' || needs.detect_changes.result != 'success')
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Download all evaluation results
+        # Missing artifacts must reach the decision step as errors.
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: eval-result-*
@@ -567,12 +574,19 @@ jobs:
 
           SAFE=0
           UNSAFE=0
+          ERRORS=0
 
           for lens in security privilege compliance static; do
             FILE="results/${lens}.json"
-            if [ ! -f "$FILE" ]; then
-              echo "  [${lens}] MISSING — counting as UNSAFE"
-              UNSAFE=$((UNSAFE + 1))
+            # Failure to obtain evidence is different from an unsafe finding.
+            # One missing, malformed, or explicitly failed voter stops the scan.
+            if [ ! -f "$FILE" ] || ! jq -e '
+              type == "object" and (.error != true) and
+              (.verdict == "SAFE" or .verdict == "UNSAFE") and
+              (.findings | type == "array")
+            ' "$FILE" > /dev/null 2>&1; then
+              echo "  [${lens}] ERROR - no valid evaluation"
+              ERRORS=$((ERRORS + 1))
               continue
             fi
 
@@ -580,7 +594,7 @@ jobs:
             case "$VERDICT" in
               SAFE)   echo "  [${lens}] SAFE";   SAFE=$((SAFE + 1)) ;;
               UNSAFE) echo "  [${lens}] UNSAFE"; UNSAFE=$((UNSAFE + 1)) ;;
-              *)      echo "  [${lens}] UNKNOWN — counting as UNSAFE"; UNSAFE=$((UNSAFE + 1)) ;;
+              *)      echo "  [${lens}] ERROR - unknown verdict"; ERRORS=$((ERRORS + 1)) ;;
             esac
           done
 
@@ -588,11 +602,13 @@ jobs:
           echo ""
           echo "  Test-file gate: $GATE_RESULT"
           echo "  SAFE: $SAFE / UNSAFE: $UNSAFE"
+          echo "  Evaluation errors: $ERRORS"
 
-          # Two triggers for FAIL:
+          # Three triggers for FAIL:
           #   1. Quorum: >=2 of 4 evaluators vote UNSAFE
           #   2. Gate: forbidden executable files present (deterministic, no vote)
-          if [ "$UNSAFE" -ge 2 ] || [ "$GATE_RESULT" != "success" ]; then
+          #   3. Incomplete evidence: even one broken voter prevents a pass
+          if [ "$UNSAFE" -ge 2 ] || [ "$GATE_RESULT" != "success" ] || [ "$ERRORS" -gt 0 ]; then
             echo "  QUORUM: FAIL"
             echo "result=FAIL" >> "$GITHUB_OUTPUT"
           else
@@ -602,23 +618,25 @@ jobs:
 
           echo "safe=$SAFE" >> "$GITHUB_OUTPUT"
           echo "unsafe=$UNSAFE" >> "$GITHUB_OUTPUT"
+          echo "errors=$ERRORS" >> "$GITHUB_OUTPUT"
           echo "gate=$GATE_RESULT" >> "$GITHUB_OUTPUT"
 
           # One plain-English sentence for people, not parsers. The run page
           # annotation, job summary, and PR comment all tell this same story.
           REASONS=""
-          [ "$UNSAFE" -ge 2 ] && REASONS="${UNSAFE} of 4 independent checks voted UNSAFE (2 are enough to block)"
+          [ "$UNSAFE" -ge 2 ] && REASONS="${UNSAFE} of 4 checks voted UNSAFE (2 are enough to fail)"
+          [ "$ERRORS" -gt 0 ] && REASONS="${REASONS:+$REASONS; }${ERRORS} evaluator(s) did not produce a valid answer"
           case "$GATE_RESULT" in
             success) ;;
             failure) REASONS="${REASONS:+$REASONS, and }the test-file gate found executable files hidden in a skill folder" ;;
             *)       REASONS="${REASONS:+$REASONS, and }the test-file gate did not finish, so the scan fails closed" ;;
           esac
           if [ -n "$REASONS" ]; then
-            HEADLINE="Merge blocked: ${REASONS}."
-            echo "::error title=Merge blocked::${REASONS}."
+            HEADLINE="Scan failed: ${REASONS}."
+            echo "::error title=Scan failed::${REASONS}."
           else
-            HEADLINE="Merge allowed: ${UNSAFE} of 4 checks voted UNSAFE (2 are needed to block), and the test-file gate passed."
-            echo "::notice title=Merge allowed::${UNSAFE} of 4 checks voted UNSAFE (2 are needed to block), and the test-file gate passed."
+            HEADLINE="Scan passed: ${UNSAFE} of 4 checks voted UNSAFE (2 are needed to fail), all evaluators answered, and the test-file gate passed."
+            echo "::notice title=Scan passed::${HEADLINE}"
           fi
           echo "headline=$HEADLINE" >> "$GITHUB_OUTPUT"
 
@@ -722,27 +740,33 @@ jobs:
             echo "## Agent/Skill Security Scan"
             echo ""
             # Fail-closed wording if the quorum step never produced a headline
-            echo "**${HEADLINE:-Merge blocked: the scan did not complete, so it fails closed.}**"
+            echo "**${HEADLINE:-Scan failed: the scan did not complete, so it fails closed.}**"
             echo ""
             # Provenance travels with every screenshot: which commit, which run
             echo "Scanned commit \`${HEAD_SHA:0:7}\` in [run ${GITHUB_RUN_ID}](${RUN_URL})"
             echo ""
-            echo "| Evaluator | Engine | Verdict |"
+            echo "| Evaluator | Requested model / static engine | Verdict |"
             echo "|-----------|--------|---------|"
             for lens in security privilege compliance static; do
               FILE="results/${lens}.json"
-              if [ -f "$FILE" ]; then
+              if [ -f "$FILE" ] && jq -e 'type == "object" and (.error != true) and (.verdict == "SAFE" or .verdict == "UNSAFE") and (.findings | type == "array")' "$FILE" > /dev/null 2>&1; then
                 V=$(jq -r '.verdict' "$FILE")
                 M=$(jq -r '.model // "unknown"' "$FILE")
                 [ "$V" = "SAFE" ] && echo "| ${lens} | ${M} | ✅ SAFE |" || echo "| ${lens} | ${M} | ❌ UNSAFE |"
               else
-                echo "| ${lens} | — | ⚠️ MISSING |"
+                echo "| ${lens} | unavailable | ⚠️ ERROR |"
               fi
             done
             GATE="${{ steps.quorum.outputs.gate }}"
             [ "$GATE" = "success" ] && echo "| test-file gate | deterministic | ✅ PASS |" || echo "| test-file gate | deterministic | ❌ FAIL |"
             echo ""
-            echo "**Quorum: ${{ steps.quorum.outputs.result }}** (${{ steps.quorum.outputs.unsafe }}/4 UNSAFE)"
+            echo "**Decision: ${{ steps.quorum.outputs.result || 'FAIL' }}** (${{ steps.quorum.outputs.unsafe || 0 }}/4 UNSAFE; ${{ steps.quorum.outputs.errors || 0 }} evaluation errors)"
+            echo ""
+            echo "Policy: 2 UNSAFE votes, any evaluation error, or a failed hard stop fails the scan. One UNSAFE vote can pass and still deserves human review."
+            echo ""
+            echo "This is a scan result. Requiring Quorum Decision in branch protection is what enforces it at merge. SAFE is not a safety certificate."
+            echo ""
+            echo "Model names record the requested configuration, not independently verified backend identity. Each voter summary above contains its findings."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR
@@ -757,6 +781,7 @@ jobs:
             const result = '${{ steps.quorum.outputs.result }}' || 'FAIL';
             const safe = ${{ steps.quorum.outputs.safe || 0 }};
             const unsafe = ${{ steps.quorum.outputs.unsafe || 0 }};
+            const errors = ${{ steps.quorum.outputs.errors || 0 }};
             const gate = '${{ steps.quorum.outputs.gate }}' || 'unknown';
             const icon = result === 'PASS' ? '✅' : '❌';
 
@@ -775,16 +800,17 @@ jobs:
             for (const lens of lenses) {
               try {
                 const data = JSON.parse(fs.readFileSync(`results/${lens}.json`, 'utf8'));
-                const vi = data.verdict === 'SAFE' ? '✅ SAFE' : '❌ UNSAFE';
+                const valid = !data.error && ['SAFE', 'UNSAFE'].includes(data.verdict) && Array.isArray(data.findings);
+                const vi = !valid ? '⚠️ ERROR' : data.verdict === 'SAFE' ? '✅ SAFE' : '❌ UNSAFE';
                 const model = data.model || 'unknown';
                 rows.push(`| ${lens} | ${model} | ${vi} |`);
 
-                if (data.findings && data.findings.length > 0 && data.verdict === 'UNSAFE') {
+                if (Array.isArray(data.findings) && data.findings.length > 0 && (data.error || data.verdict === 'UNSAFE')) {
                   const items = data.findings.map(renderFinding).join('\n');
                   findingsBlocks.push(`**${lens}** (${model}):\n${items}`);
                 }
               } catch {
-                rows.push(`| ${lens} | — | ⚠️ MISSING |`);
+                rows.push(`| ${lens} | unavailable | ⚠️ ERROR |`);
               }
             }
 
@@ -804,11 +830,12 @@ jobs:
             }
 
             // Same one-sentence story as the run page; fail-closed wording if missing
-            const headline = process.env.HEADLINE || 'Merge blocked: the scan did not complete, so it fails closed.';
+            const headline = process.env.HEADLINE || 'Scan failed: the scan did not complete, so it fails closed.';
 
             let body = `## ${icon} Agent/Skill Security Scan\n\n**${headline}**\n\n`;
-            body += `| Evaluator | Engine | Verdict |\n|-----------|--------|---------|\n${rows.join('\n')}\n\n`;
-            body += `**Quorum: ${result}** (${unsafe}/4 UNSAFE)\n`;
+            body += `| Evaluator | Requested model / static engine | Verdict |\n|-----------|--------|---------|\n${rows.join('\n')}\n\n`;
+            body += `**Decision: ${result}** (${unsafe}/4 UNSAFE; ${errors} evaluation errors)\n`;
+            body += '\nTwo UNSAFE votes, any evaluation error, or a failed hard stop fails the scan. Branch protection must require **Quorum Decision** to enforce it at merge. Model names are requested configuration, not independently verified backend identity.\n';
 
             if (findingsBlocks.length > 0) {
               if (result === 'FAIL') {
@@ -854,7 +881,7 @@ jobs:
         # Fail-closed: fail unless the quorum step explicitly produced PASS.
         # An empty result means the quorum step was skipped or errored, which
         # must not merge as a pass under required-check protection.
-        if: steps.quorum.outputs.result != 'PASS'
+        if: always() && steps.quorum.outputs.result != 'PASS'
         run: |
           echo "❌ Quorum did not return PASS (result='${{ steps.quorum.outputs.result }}') — failing build."
           exit 1

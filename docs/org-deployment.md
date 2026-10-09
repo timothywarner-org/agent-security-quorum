@@ -1,107 +1,19 @@
-# Org-Level Deployment
+# Adoption across repositories
 
-Deploy the agent security scanner across all repositories in your GitHub organization.
+**Start with one repository and an accountable maintainer.** This project ships ordinary pull-request workflows, not a ready-made reusable workflow service.
 
-## How It Works
+1. Copy both workflows and **prompts/** into a pilot repository.
+2. Provide **COPILOT_PAT** as a repository secret, or an organization secret restricted to the intended repositories.
+3. Run the access probe and harmless/risky integration examples. Inspect actual findings and review effort.
+4. Decide whether **Quorum Decision** should be required. Account for path-filtered and fork PR behavior in the [configuration guide](configuration-guide.md).
+5. Add **CODEOWNERS** in each repository and require approvals for workflow and prompt changes.
 
-GitHub supports [reusable workflows](https://docs.github.com/en/actions/using-workflows/reusing-workflows) via `workflow_call`. You move the scanner to your org's `.github` repository, and individual repos call it with a single line.
+Do not assume an organization **.github** repository automatically makes these workflows or ownership rules apply everywhere. Keep the copied scanner version documented and review upgrades as normal changes.
 
-## Step 1: Move to Org `.github` Repo
+## When centralization earns its keep
 
-Copy the workflow and scripts to your org-level repo:
+A reusable workflow becomes useful when maintaining copies causes measurable drift. Before introducing **workflow_call**, define the caller event contract, permissions, secret mapping, and where trusted prompts and scanner code are checked out. Test it in a separate pilot.
 
-```
-your-org/.github/
-  workflow-templates/
-    agent-scan.yml              # template for new repos
-  .github/
-    workflows/
-      agent-scan-reusable.yml   # reusable workflow
-  scripts/
-    detect-changes.sh
-    validate-structure.sh
-    llm-evaluate.sh
-    aggregate.sh
-  prompts/
-    v1.txt
-    lens-security.txt
-    lens-privilege.txt
-    lens-compliance.txt
-```
+There is no **scripts/** directory to copy. The built-in Actions token is not a drop-in replacement for this repository's **COPILOT_PAT** configuration. Check current support and organization policy before changing authentication.
 
-## Step 2: Convert to Reusable Workflow
-
-Modify `agent-scan-reusable.yml` to accept `workflow_call`:
-
-```yaml
-name: Agent/Skill Security Scan (Reusable)
-
-on:
-  workflow_call:
-    secrets:
-      GH_TOKEN:
-        required: true
-
-# ... rest of the workflow stays the same
-```
-
-## Step 3: Call from Any Repo
-
-In each repo that has agent/skill files, add a thin caller workflow:
-
-```yaml
-# .github/workflows/agent-scan.yml
-name: Agent Security Scan
-
-on:
-  pull_request:
-    paths:
-      - ".github/agents/**"
-      - ".github/skills/**"
-      - ".claude/agents/**"
-      - ".claude/skills/**"
-
-jobs:
-  scan:
-    uses: your-org/.github/.github/workflows/agent-scan-reusable.yml@main
-    secrets:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-```
-
-That's it. Every repo gets scanning with zero local configuration.
-
-## Step 4: Enforce with Branch Protection
-
-For each repo (or via org-level rulesets):
-
-1. Go to **Settings > Branches > Branch protection rules**
-2. Enable **Require status checks to pass before merging**
-3. Add the `Quorum Decision` check
-
-Or use [org-level repository rulesets](https://docs.github.com/en/organizations/managing-organization-settings/managing-rulesets-for-repositories-in-your-organization) to enforce this across all repos at once.
-
-## Step 5: CODEOWNERS (Org-Level)
-
-In your org `.github` repo, add a `CODEOWNERS` file that applies to inherited paths:
-
-```
-# All repos inherit these ownership rules
-.github/agents/   @your-org/security-team
-.github/skills/   @your-org/security-team
-.claude/agents/   @your-org/security-team
-.claude/skills/   @your-org/security-team
-```
-
-## Updating the Scanner
-
-Because all repos reference the org-level workflow via `@main`, updates to the scanner are picked up automatically. Pin to a tag (e.g., `@v1`) for stability:
-
-```yaml
-uses: your-org/.github/.github/workflows/agent-scan-reusable.yml@v1
-```
-
-## Limitations
-
-- Reusable workflows can only be called from workflows in other repos within the same org (or public repos)
-- The calling repo must have Actions enabled
-- Secrets must be explicitly passed (they don't inherit automatically)
+The owner should review false alarms, missed fixture detections, usage, run duration, and time spent investigating results. Keep model reviewers only when their extra findings justify that work.

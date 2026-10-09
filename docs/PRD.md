@@ -1,4 +1,4 @@
-Alright—this is a legit **platform feature**, not a script. I wrote this so you can hand it straight to a CLI coding agent and get something production-grade back.
+> **Historical proposal.** This document predates the four-voter implementation. Use the [README](../README.md) and [configuration guide](configuration-guide.md) for current behavior. The older model, script, and deployment examples below are design history, not installation instructions.
 
 No fluff. Tight contracts. Clear scope.
 
