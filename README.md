@@ -10,6 +10,8 @@ This teaching project reviews changes to AI agent and skill files. Three models 
 
 **[Start with the Actions walkthrough](docs/demo-walkthrough.md)** or open the [scan history](https://github.com/timothywarner-org/agent-security-quorum/actions/workflows/agent-scan.yml). The run page is the demo interface. No dashboard, hosted application, or local build is required.
 
+For a durable reference, use the [v0.1.0 evidence package](docs/evidence/v0.1.0/README.md). To contribute without a Copilot account, start with the [regression checks](CONTRIBUTING.md#verify-without-a-model-account) and [fixture scorecard](docs/fixture-scorecard.md).
+
 ## The decision
 
 | Evidence | Decision |
@@ -59,6 +61,8 @@ The [walkthrough](docs/demo-walkthrough.md) supplies recorded examples and a nin
 
 Copilot usage draws on the authenticated user's entitlements and may incur charges. Actions usage and human review also count toward operating cost. This project does not measure cost per accepted result.
 
+Review [data handling](docs/data-handling.md) before submitting private files. Selected file contents leave the runner through Copilot; diagnostic output is not automatically safe to publish.
+
 ## Scope and limits
 
 | Location | Scanned content |
@@ -83,13 +87,16 @@ The [workflow standard](docs/workflow-standard.md) records the verified stable r
 | .github/workflows/copilot-probe.yml | Token and model availability checks |
 | prompts/ | Base rubric and three review lenses |
 | test/fixtures/ | Harmless and deliberately risky examples, treated as data |
+| test/check_workflow.py | Secret-free regression tests against actual workflow shell |
+| docs/fixture-scorecard.md | Intended outcomes, observed results, and known misses |
+| docs/evidence/v0.1.0/ | Sanitized, dated run evidence that outlives Actions artifacts |
 | docs/demo-walkthrough.md | Run-history presentation route and evidence |
 | docs/configuration-guide.md | Setup, policy, troubleshooting |
 | docs/org-deployment.md | Small-scale adoption and ownership |
 | docs/PRD.md | Historical proposal, not current configuration |
 
-The product stays as inline workflow logic and prompt files. There is no application runtime, package manifest, or scripts framework to deploy.
+The product stays as inline workflow logic and prompt files. The test-only harness adds no application runtime or scripts framework to deploy.
 
 ## Contributing and license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the [MIT license](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), the [contribution roadmap](docs/community-roadmap.md), [maintenance policy](docs/maintenance.md), and the [MIT license](LICENSE).

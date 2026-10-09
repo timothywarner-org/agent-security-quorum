@@ -5,7 +5,7 @@
 1. Copy both workflows and **prompts/** into a pilot repository.
 2. Provide **COPILOT_PAT** as a repository secret, or an organization secret restricted to the intended repositories.
 3. Run the access probe and harmless/risky integration examples. Inspect actual findings and review effort.
-4. Decide whether **Quorum Decision** should be required. Account for path-filtered and fork PR behavior in the [configuration guide](configuration-guide.md).
+4. Decide whether **Quorum Decision** and **Policy regression** should be required. Account for scope decisions and fork PR behavior in the [configuration guide](configuration-guide.md).
 5. Add **CODEOWNERS** in each repository and require approvals for workflow and prompt changes.
 
 Do not assume an organization **.github** repository automatically makes these workflows or ownership rules apply everywhere. Keep the copied scanner version documented and review upgrades as normal changes.

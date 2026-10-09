@@ -1,0 +1,39 @@
+name: Community Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Fork contributions get useful regression checks without a model credential.
+permissions:
+  contents: read
+
+concurrency:
+  group: community-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Policy regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.8"
+      - name: Install test dependency
+        # Avoid reading package-manager configuration from the PR checkout.
+        working-directory: ${{ runner.temp }}
+        env:
+          PIP_CONFIG_FILE: /dev/null
+          REQUIREMENTS: ${{ github.workspace }}/test/requirements.txt
+        run: python -m pip install --disable-pip-version-check --requirement "$REQUIREMENTS"
+      - name: Test production policy shell
+        run: python test/check_workflow.py

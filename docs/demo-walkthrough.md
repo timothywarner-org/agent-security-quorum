@@ -2,6 +2,8 @@
 
 **The question is who supplies evidence, what the policy does with it, and who owns the consequence.** Keep the browser on completed GitHub runs. The workflow itself is supporting material, not the main screen.
 
+The [v0.1.0 evidence archive](evidence/v0.1.0/README.md) preserves the selected vote records and provenance when Actions logs/artifacts expire. The [fixture scorecard](fixture-scorecard.md) separates intended outcomes from individual static observations.
+
 ## Open these before presenting
 
 | Beat | Evidence | What it establishes |

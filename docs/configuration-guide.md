@@ -10,6 +10,8 @@ The source of truth is [agent-scan.yml](../.github/workflows/agent-scan.yml). Th
 4. Open a same-repository PR with a harmless agent change. Scanner/probe workflow and prompt changes also exercise the scanner against all tracked agent and skill files.
 5. Review the result, then configure required checks and approvals appropriate to the repository.
 
+Include **Community Checks / Policy regression** and the test directory when adopting the contributor checks. Their only Python dependency is the pinned test-only requirements file. See [CONTRIBUTING](../CONTRIBUTING.md) for the no-secret path, [data handling](data-handling.md) before private input, and [maintenance](maintenance.md) for this repository's enforcement policy.
+
 GitHub documents PAT setup in [Automating tasks with Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/automate-with-actions). This repository uses that explicit PAT route; it does not automatically adopt other authentication configurations supported by newer CLI versions.
 
 ## Configuration in one place

@@ -7,7 +7,8 @@
 
 # The scanner itself requires review
 prompts/          @timothywarner
-.github/workflows/agent-scan.yml @timothywarner
-.github/workflows/copilot-probe.yml @timothywarner
+.github/workflows/ @timothywarner
 .github/dependabot.yml @timothywarner
 .github/CODEOWNERS @timothywarner
+test/ @timothywarner
+SECURITY.md @timothywarner

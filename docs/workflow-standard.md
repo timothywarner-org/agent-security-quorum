@@ -44,6 +44,8 @@ Dependabot proposes one grouped weekly update for GitHub Actions. Review its rel
 
 Test a harmless input, a risky input, missing/invalid reviewer evidence, and the no-relevant-change path. Recheck Cisco report parsing whenever its version changes. Review scan duration, false alarms, missed fixtures, and request usage before expanding the design.
 
+Community Checks runs the test-only PyYAML 6.0.3 harness on every PR and on pushes to main, without Copilot secrets. Its checkout/setup-python SHA pins match the table above. See [maintenance and enforcement](maintenance.md) for the required checks and maintainer review exception.
+
 Dependabot PRs may lack COPILOT_PAT. A reviewed update needs a trusted maintainer branch to exercise paid reviewers with the existing credential. Never expose a secret merely to make an automated update green.
 
 ## Boundaries this file cannot enforce

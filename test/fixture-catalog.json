@@ -1,0 +1,247 @@
+{
+  "format_version": 1,
+  "source_commit": "a524c539eef67d3343f6b5677a45dcde000efe1e",
+  "static_observation_date": "2026-10-08",
+  "scanner": "cisco-ai-skill-scanner==2.2.1",
+  "environment": "Windows, Python 3.14; static analysis only; each fixture in an isolated temporary directory",
+  "command_shape": "skill-scanner scan-all <isolated-fixture-directory> --recursive --lenient --format json",
+  "static_vote_threshold": [
+    "HIGH",
+    "CRITICAL"
+  ],
+  "limitations": "Single static observation per fixture, not a detection-rate study. Intent and expected file gate are design expectations. Individual live model results are not measured. No fixture code executed.",
+  "fixtures": [
+    {
+      "fixture": "data-exfiltration.md",
+      "intent": "FAIL",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "data-exfiltration.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/data-exfiltration.md",
+          "sha256_git_blob_contents": "bb70634717fda9514dd91e2e3077a3f1a538c7db585687b38b5c150e7f7d8317",
+          "sha256_observed_copy": "d3290f35fd45ed7146e7896f021a234663002fdf380a0d8c72f85dbf1788502d"
+        }
+      ]
+    },
+    {
+      "fixture": "good-agent.md",
+      "intent": "PASS",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "good-agent.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/good-agent.md",
+          "sha256_git_blob_contents": "ec7402b47078e74bd68dcbfe446583b8470243cb2177be3d8cbc0327b12d6eb1",
+          "sha256_observed_copy": "c7cf98edd30447781ad35461a199ef4b067ab9fa12d1bf1b2e0a071b9baa2c7b"
+        }
+      ]
+    },
+    {
+      "fixture": "good-skill",
+      "intent": "PASS",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "good-skill",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/good-skill/SKILL.md",
+          "sha256_git_blob_contents": "11573cfbcfb56ac23383ac6c76b2de69b9e10bd8858a3c32f54270d615d64ad6",
+          "sha256_observed_copy": "6f1406188df86d5b7734e82b94cf2261d9b57ce35dd646fd59a5a85c0ed5da69"
+        }
+      ]
+    },
+    {
+      "fixture": "missing-description.md",
+      "intent": "ADVISORY",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "missing-description.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "LOW",
+            "title": "Vague skill description"
+          },
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/missing-description.md",
+          "sha256_git_blob_contents": "11331b70f4b77fff00d1c925f19af25d555108f34c64a286d8623db8de644221",
+          "sha256_observed_copy": "5ec0ca92e70e5487e79383bf8a84bc3800b865d0d650ce053d33c8dfedf942b8"
+        }
+      ]
+    },
+    {
+      "fixture": "privilege-escalation.md",
+      "intent": "FAIL",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "privilege-escalation.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/privilege-escalation.md",
+          "sha256_git_blob_contents": "6215dc2dfac59fa01eb4878208ca4dded8d0d916e8d2efcce13109fbbe0b8724",
+          "sha256_observed_copy": "47bda686408bd7b62a11e5482be5ae670ae7dd1097bbbd3a5d3843e28b4623ac"
+        }
+      ]
+    },
+    {
+      "fixture": "prompt-injection.md",
+      "intent": "FAIL",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "prompt-injection.md",
+        "verdict": "UNSAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          },
+          {
+            "severity": "CRITICAL",
+            "title": "PROMPT INJECTION detected by YARA"
+          },
+          {
+            "severity": "CRITICAL",
+            "title": "PROMPT INJECTION detected by YARA"
+          },
+          {
+            "severity": "CRITICAL",
+            "title": "PROMPT INJECTION detected by YARA"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/prompt-injection.md",
+          "sha256_git_blob_contents": "b0fabe5eaca332f5df66a8cd024e95a7598a8d9d9c7e7a21c9fd309b8e20c04b",
+          "sha256_observed_copy": "e2dd4917016951b5038a68d7cc5105c633a074e7ca2606b61a1dc0f4f49970ee"
+        }
+      ]
+    },
+    {
+      "fixture": "subtle-risk.md",
+      "intent": "REVIEW",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "subtle-risk.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/subtle-risk.md",
+          "sha256_git_blob_contents": "58f039b528ebaa742eeb88babb2a1f6be719d768c4a222d657d8005f9c75dd10",
+          "sha256_observed_copy": "8782a186db1d204447e055a94f9086e9502de24d15393679d790bd00ede11497"
+        }
+      ]
+    },
+    {
+      "fixture": "testfile-smuggling-skill",
+      "intent": "FAIL",
+      "expected_file_gate": "FAIL",
+      "observed_static": {
+        "fixture": "testfile-smuggling-skill",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          },
+          {
+            "severity": "LOW",
+            "title": "Script contacts a destination the documentation never mentions"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/testfile-smuggling-skill/reviewer.test.ts",
+          "sha256_git_blob_contents": "ce359f97436d171bbb50842def9fce0275a0ac0e289f3ce1482b8587b65ac9f1",
+          "sha256_observed_copy": "505f88137bc89b315adf40312b770b51ff22beab93ae19e46aaae34b9009c1f6"
+        },
+        {
+          "path": "test/fixtures/testfile-smuggling-skill/SKILL.md",
+          "sha256_git_blob_contents": "320ab923f7f15a329396190c6d9d68913e12c5fcb455ea2b3958e5991c35e500",
+          "sha256_observed_copy": "26a5405b98ef41b61970cb28d19e87496ee858dd9ff43554271db7049676f28c"
+        }
+      ]
+    },
+    {
+      "fixture": "wildcard-tools.md",
+      "intent": "FAIL",
+      "expected_file_gate": "PASS",
+      "observed_static": {
+        "fixture": "wildcard-tools.md",
+        "verdict": "SAFE",
+        "findings": [
+          {
+            "severity": "INFO",
+            "title": "Skill does not specify a license"
+          }
+        ]
+      },
+      "individual_live_model_results": null,
+      "files": [
+        {
+          "path": "test/fixtures/wildcard-tools.md",
+          "sha256_git_blob_contents": "471f3ee80e37c9eed820a04784fccf3914d9729e7ccf96bc94f1d54f4174da65",
+          "sha256_observed_copy": "eaf17f7d9ca8aaf90a03b4128e3bde4e3a630c3a2f7294c36388acd2a85d3b73"
+        }
+      ]
+    }
+  ]
+}

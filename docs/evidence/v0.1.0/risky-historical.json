@@ -1,0 +1,104 @@
+{
+  "evidence_type": "observed_live_run",
+  "captured_on": "2026-10-09",
+  "run_id": 35445419741,
+  "run_url": "https://github.com/timothywarner-org/agent-security-quorum/actions/runs/35445419741",
+  "source_commit": "ee80d8424ef49c42f7967c9887b86e6b93fc8739",
+  "started_at_utc": "2026-09-19T13:19:33Z",
+  "conclusion": "failure",
+  "workflow_version_pins": {
+    "COPILOT_CLI_VERSION": "1.0.86",
+    "SKILL_SCANNER_VERSION": "2.1.0"
+  },
+  "votes": [
+    {
+      "lens": "compliance",
+      "requested_model_or_engine": "gemini-3.7-flash",
+      "verdict": "UNSAFE",
+      "error": false,
+      "finding_count": 4,
+      "finding_ids": [
+        "AST01",
+        "AST02",
+        "AST06",
+        "AST09"
+      ],
+      "source_artifact_sha256": "782b9cf61775bd3c68fad089aee3febe4303a9d0505e2b533b65c40cf2c82d52"
+    },
+    {
+      "lens": "privilege",
+      "requested_model_or_engine": "claude-sonnet-5",
+      "verdict": "UNSAFE",
+      "error": false,
+      "finding_count": 5,
+      "finding_ids": [
+        "AST01",
+        "AST02",
+        "AST03",
+        "AST06"
+      ],
+      "source_artifact_sha256": "4700d952f2e7657e4b7472a30a60394c6c00e7380301383bc40d622f6a3dd0d2"
+    },
+    {
+      "lens": "security",
+      "requested_model_or_engine": "gpt-5.5",
+      "verdict": "UNSAFE",
+      "error": false,
+      "finding_count": 3,
+      "finding_ids": [
+        "AST01",
+        "AST02"
+      ],
+      "source_artifact_sha256": "c57c778ca083796ae607abf4d8311d2ebefb3b21bae41fc742c08666bf4cfb59"
+    },
+    {
+      "lens": "static",
+      "requested_model_or_engine": "cisco-skill-scanner",
+      "verdict": "UNSAFE",
+      "error": false,
+      "finding_count": 2,
+      "finding_ids": [
+        "UNMAPPED"
+      ],
+      "source_artifact_sha256": "0cf57b28c1af655b3c9a8441974c176684a9220e4474072af201c8be624664f7"
+    }
+  ],
+  "jobs": [
+    {
+      "name": "Detect Changes",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vote: static analysis (Cisco skill-scanner)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vote: privilege lens (Anthropic claude-sonnet-5)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Advisory: structure check",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vote: security lens (OpenAI gpt-5.5)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Vote: compliance lens (Google gemini-3.7-flash)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Hard stop: test-file gate",
+      "conclusion": "failure"
+    },
+    {
+      "name": "Quorum Decision",
+      "conclusion": "failure"
+    }
+  ],
+  "historical": true,
+  "request_usage": "not measured",
+  "cost": "not measured",
+  "limitations": "Curated public result snapshot, not backend attestation or measured detection accuracy. Raw prompts, findings text, and logs are intentionally omitted. Historical runs can use older policy."
+}

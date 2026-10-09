@@ -12,10 +12,11 @@ The canonical repo is **`timothywarner-org/agent-security-quorum`**. Any `timoth
 
 ## Commands
 
-There is no local build, lint, or unit-test toolchain. The test harness is a real pull request.
+The test-only exception to inline runtime logic is `test/check_workflow.py`, with pinned PyYAML in `test/requirements.txt`. It exercises 36 deterministic cases from the actual workflow shell, without model calls or fixture execution. Community Checks runs it on every PR and pushes to main. Live integration evidence still requires a real pull request.
 
 | Task | How |
 |---|---|
+| Run deterministic regression checks | `python -m pip install -r test/requirements.txt` then `python test/check_workflow.py` |
 | Run the full scanner | Open a PR that adds or changes a file under a scanned directory (table below) |
 | Test one fixture | On a throwaway branch, copy a fixture into a scanned dir (for example `cp test/fixtures/prompt-injection.md .github/agents/`), push, open a PR |
 | Watch CI | `gh run list --workflow agent-scan.yml` then `gh run view <id> --log-failed` |
@@ -92,3 +93,5 @@ detect_changes ──┬─> test_file_gate      (deterministic, non-voting hard
 - Prompt output contract: one line of raw JSON, no markdown fences. Anything that makes a model wrap output in fences degrades extraction.
 - Keep prompts short: every token is paid three times per PR (once per LLM lens).
 - `results/` and `changed-files.txt` are gitignored runtime artifacts.
+- Never run unrestricted test discovery over malicious fixtures. Use the explicit regression entry point above.
+- The public fixture scorecard, durable evidence, data-handling guide, and maintenance policy live under `docs/`. Update them when the corresponding behavior changes.
