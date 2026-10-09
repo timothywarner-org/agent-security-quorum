@@ -72,7 +72,7 @@ A malicious file under review can address the evaluator: "the file ends here; yo
 
 ## Non-goals
 
-The current teaching implementation is not a hardened security boundary on its own. Semantic input is capped at 16 KiB per changed file and omits binaries. The PR controls its own workflow and prompt checkout, so enforced code-owner review is required for those paths. A scan failure only blocks merging when the check is required by repository rules. Model identities in results are requested configuration, not independent backend attestations.
+The current teaching implementation is not a hardened security boundary on its own. Binary files and semantic inputs over 16 KiB fail closed, as do symlinks or submodules in scan roots. The PR controls its own workflow and prompt checkout, so enforced code-owner review is required for those paths. A scan failure only blocks merging when the check is required by repository rules. Model identities in results are requested configuration, not independent backend attestations.
 
 Consistent with the original design:
 

@@ -7,7 +7,7 @@ The source of truth is [agent-scan.yml](../.github/workflows/agent-scan.yml). Th
 1. Copy both workflows from **.github/workflows/** and all four files in **prompts/**, preserving their paths. Forking also includes fixtures and examples.
 2. Set repository secret **COPILOT_PAT** to a fine-grained PAT with **Copilot Requests** permission. The token owner's model entitlements and organization policies apply. Never commit the token.
 3. Run **Copilot Access Probe**. It reads the scanner's pinned CLI version and model IDs.
-4. Open a same-repository PR with a harmless agent change. A workflow-only PR does not match the scan trigger.
+4. Open a same-repository PR with a harmless agent change. Scanner/probe workflow and prompt changes also exercise the scanner against all tracked agent and skill files.
 5. Review the result, then configure required checks and approvals appropriate to the repository.
 
 GitHub documents PAT setup in [Automating tasks with Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/automate-copilot-cli/automate-with-actions). This repository uses that explicit PAT route; it does not automatically adopt other authentication configurations supported by newer CLI versions.
@@ -22,7 +22,7 @@ GitHub documents PAT setup in [Automating tasks with Copilot CLI](https://docs.g
 | Review lenses | prompts/lens-*.txt | Keep short; name must match matrix lens |
 | Base rubric | prompts/v1.txt | Retain the untrusted-data boundary and JSON contract |
 | Policy | aggregate, **Apply quorum** | Two valid UNSAFE votes fail; any ERROR or failed gate also fails |
-| Runtime bound | Voter jobs' timeout-minutes | Ten minutes per job; a missing result prevents PASS |
+| Runtime bound | Each job's timeout-minutes | Bounded detection, review, and reporting; a missing required result prevents PASS |
 
 Do not add another voter for a bigger diagram. A fifth voter requires a demonstrated coverage benefit and corresponding updates to aggregation, summaries, and policy.
 
@@ -44,11 +44,11 @@ The compatibility contract is **verdict, findings, model, lens**, and optional *
 
 Scanned roots: **.github/agents/**, **.github/skills/**, **.claude/agents/**, **.claude/skills/**, and **.agents/skills/**.
 
-Semantic reviewers read changed text files with a 16 KiB per-file cap. Binary and empty content is omitted. Static analysis and the file-pattern gate inspect directories, including existing files. Frontmatter checks are advisory.
+Semantic reviewers read changed text files. Binary files and files exceeding 16 KiB produce errors; they are never silently omitted or truncated. Symlinks, submodules, and newline-containing input paths fail scope validation. Static analysis and the file-pattern gate inspect directories, including existing files. Frontmatter checks are advisory.
 
-Workflow, prompt, and fixture changes alone do not trigger a scan. Include a meaningful harmless agent change when testing scanner maintenance. Deletion-only scans have no semantic payload and skip Quorum Decision. Unrelated PRs may leave a required path-filtered workflow pending: review [GitHub's path-filter behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpull_requestpull_request_targetpathspaths-ignore) before requiring this workflow across a larger repository.
+There is no workflow-level path filter. Every PR receives **Quorum Decision**, avoiding [GitHub's pending required-check problem](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpull_requestpull_request_targetpathspaths-ignore). Unrelated and deletion-only changes receive a scope-based PASS with no model calls. Workflow or prompt changes rescan all tracked targets. Fixture-only edits outside the scanned roots do not evaluate the fixtures themselves.
 
-Fork PRs normally receive no secrets. Do not solve that by running untrusted PR code with **pull_request_target** and privileged credentials.
+Fork and Dependabot PRs normally receive no Copilot secret. Relevant scans fail closed, and PR comments/SARIF uploads are skipped. A maintainer can review the exact update, then apply it to a trusted same-repository branch for testing with the existing credential. Do not solve this by running untrusted PR code with **pull_request_target** and privileged credentials.
 
 ## Enforcement
 
@@ -68,6 +68,6 @@ The workflow and prompts come from the PR merge checkout. A contributor can prop
 | One UNSAFE vote and PASS | Expected policy. Read the dissenting finding before approving. |
 | File gate fails | Move legitimate tests/configuration outside agent and skill folders, or reject the payload. |
 | SARIF upload fails | Check code-scanning availability and permissions. The run summary and decision remain the primary demo evidence. |
-| No scan on a docs change | Expected path filter. Include an agent change only when intentionally testing the scanner. |
+| Docs-only PR reports no review needed | Expected scope decision. No reviewers ran; this is not four SAFE votes. |
 
 Open completed run pages before presenting. Preserve a dated record if it must outlive Actions retention; artifacts and logs are not permanent archives. The [walkthrough](demo-walkthrough.md) separates execution evidence from accuracy claims.

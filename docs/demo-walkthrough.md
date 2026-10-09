@@ -28,7 +28,7 @@ The risky run contains **both** malicious instructions and a bundled test payloa
 ## Rehearse without adding an application
 
 1. Run the access probe and resolve maintenance warnings before depending on a live scan.
-2. Use a same-repository PR with a harmless agent edit for baseline evidence. Scanner-only changes need an agent edit to match the path filter.
+2. Use a same-repository PR with a harmless agent edit for baseline evidence. Scanner/probe workflow and prompt changes also trigger a review of all tracked targets. Unrelated PRs receive a scope-based PASS without model calls.
 3. Confirm all four results are valid, not fail-safe errors. Record the exact run URL, source commit, requested models, and decision.
 4. Keep the risky example PR unmerged. Treat malicious fixtures as inert review data; never execute their bundled code.
 5. Open completed run pages in advance. A fresh run can be optional audience participation, but the presentation does not wait for it.

@@ -2,13 +2,9 @@ name: Agent/Skill Security Scan
 run-name: "PR #${{ github.event.pull_request.number }} | ${{ github.event.pull_request.title }}"
 
 on:
+  # Required workflows must report on every PR. Scope the costly jobs below,
+  # rather than leaving a path-filtered required check permanently pending.
   pull_request:
-    paths:
-      - ".github/agents/**"
-      - ".github/skills/**"
-      - ".claude/agents/**"
-      - ".claude/skills/**"
-      - ".agents/skills/**"
 
 # Least privilege by default: every job can only read. The one job that
 # writes (aggregate) asks for its extra permissions itself, so the jobs that
@@ -28,8 +24,14 @@ concurrency:
 # Actions use verified commit pins with release labels. The fixed runner image
 # avoids an ubuntu-latest migration changing the rehearsal environment.
 env:
-  COPILOT_CLI_VERSION: "1.0.86"
-  SKILL_SCANNER_VERSION: "2.1.0"
+  COPILOT_CLI_VERSION: "1.0.94"
+  SKILL_SCANNER_VERSION: "2.2.1"
+  NODE_VERSION: "24.21.0" # Current LTS, rather than the non-LTS release line
+  PYTHON_VERSION: "3.14.8" # Latest stable line supported by scanner (<3.15)
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   # ──────────────────────────────────────────────
@@ -42,6 +44,7 @@ jobs:
   detect_changes:
     name: Detect Changes
     runs-on: ubuntu-24.04
+    timeout-minutes: 3
     outputs:
       has_changes: ${{ steps.detect.outputs.has_changes }}
       changed_files: ${{ steps.detect.outputs.changed_files }}
@@ -55,27 +58,46 @@ jobs:
 
       - name: Find changed agent/skill files
         id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          # --diff-filter=d excludes deletions: a removed file cannot carry a payload.
-          # core.quotePath=false keeps git from wrapping non-ASCII names in
-          # escaped quotes ("pr\303\251view.md"); a quoted name fails the
-          # file-exists check downstream and would skip the file entirely.
-          FILES=$(git -c core.quotePath=false diff --name-only --diff-filter=d ${{ github.event.pull_request.base.sha }}...HEAD -- \
-            '.github/agents' \
-            '.github/skills' \
-            '.claude/agents' \
-            '.claude/skills' \
-            '.agents/skills' \
-          )
+          ROOTS=(.github/agents .github/skills .claude/agents .claude/skills .agents/skills)
+          LIST="$RUNNER_TEMP/asq-scan-paths"
+          # Capture git failures before reading paths. NUL records keep hostile
+          # filenames from becoming shell syntax or fabricated list entries.
+          git diff --name-only -z --diff-filter=d "$BASE_SHA"...HEAD -- "${ROOTS[@]}" > "$LIST"
+          CONFIG_CHANGED=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            .github/workflows/agent-scan.yml .github/workflows/copilot-probe.yml prompts)
+          if [ -n "$CONFIG_CHANGED" ]; then
+            # Changing the judge must exercise it, even without an agent edit.
+            git ls-files -z -- "${ROOTS[@]}" > "$LIST"
+          fi
+          mapfile -d '' -t PATHS < "$LIST"
+          FILES=""
+          for file in "${PATHS[@]}"; do
+            # The downstream text contract is one path per line. Reject an
+            # unsupported name instead of silently inspecting a different file.
+            if [[ "$file" == *$'\n'* || "$file" == *$'\r'* ]]; then
+              echo "::error::Scan paths must not contain newline characters."
+              exit 1
+            fi
+            FILES+="${file}"$'\n'
+          done
 
           if [ -z "$FILES" ]; then
             echo "No agent/skill files changed."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Changed files:"
-            echo "$FILES"
+            # Both scanners inspect the tree. Links can escape it, even when
+            # their target is not in the changed-file list. Never follow them.
+            LINKS=$(git ls-files --stage -- "${ROOTS[@]}" | awk '$1 == "120000" || $1 == "160000"')
+            if [ -n "$LINKS" ]; then
+              echo "::error::Agent and skill folders must not contain symlinks or submodules."
+              exit 1
+            fi
+            echo "Files selected for review: ${#PATHS[@]}"
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "changed_files=$(echo "$FILES" | base64 -w 0)" >> "$GITHUB_OUTPUT"
+            echo "changed_files=$(printf '%s' "$FILES" | base64 -w 0)" >> "$GITHUB_OUTPUT"
           fi
 
   # ──────────────────────────────────────────────
@@ -92,6 +114,7 @@ jobs:
     # four "Vote" jobs, one "Hard stop", one "Quorum Decision"
     name: "Hard stop: test-file gate"
     runs-on: ubuntu-24.04
+    timeout-minutes: 3
     needs: detect_changes
     if: needs.detect_changes.outputs.has_changes == 'true'
     outputs:
@@ -148,6 +171,7 @@ jobs:
   validate_structure:
     name: "Advisory: structure check"
     runs-on: ubuntu-24.04
+    timeout-minutes: 3
     needs: detect_changes
     if: needs.detect_changes.outputs.has_changes == 'true'
     steps:
@@ -236,8 +260,14 @@ jobs:
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # PR-controlled package metadata must not enable an unexpected cache.
+          package-manager-cache: false
 
       - name: Install Copilot CLI
+        # Avoid PR-controlled npm configuration while installing the analyzer.
+        working-directory: ${{ runner.temp }}
         run: |
           npm install -g "@github/copilot@${COPILOT_CLI_VERSION}"
           copilot --version
@@ -261,16 +291,14 @@ jobs:
               UNREADABLE+="${file} "
               continue
             fi
-            # grep -I treats binary as no-match: binary blobs pollute the prompt
-            if ! grep -qI . "$file"; then
-              FILE_CONTENTS+="=== SKIPPED (binary or empty): ${file} ==="$'\n\n'
+            # Never issue SAFE for a file we silently truncated or omitted.
+            # Empty files contain no instructions and can be represented as such.
+            if [ -s "$file" ] && { ! grep -qI . "$file" || [ "$(wc -c < "$file")" -gt 16384 ]; }; then
+              UNREADABLE+="${file} (binary or over 16 KiB) "
               continue
             fi
             FILE_CONTENTS+="=== BEGIN UNTRUSTED FILE: ${file} ==="$'\n'
-            FILE_CONTENTS+="$(head -c 16384 "$file")"$'\n'
-            if [ "$(wc -c < "$file")" -gt 16384 ]; then
-              FILE_CONTENTS+="[TRUNCATED at 16384 bytes]"$'\n'
-            fi
+            FILE_CONTENTS+="$(cat "$file")"$'\n'
             FILE_CONTENTS+="=== END UNTRUSTED FILE: ${file} ==="$'\n\n'
           done <<< "$FILES"
 
@@ -312,9 +340,13 @@ jobs:
           ( cd "$ANALYZER_DIR" && copilot -p "$(cat /tmp/prompt.txt)" \
               --model "$MODEL" \
               --output-format json \
+              --no-auto-update \
               --no-ask-user \
               --no-custom-instructions \
               --disable-builtin-mcps \
+              --deny-tool=read \
+              --deny-tool=url \
+              --deny-tool=memory \
               --deny-tool=shell \
               --deny-tool=write ) > /tmp/copilot-output.jsonl 2>/tmp/copilot-stderr.txt
           EXIT_CODE=$?
@@ -418,6 +450,8 @@ jobs:
         with:
           name: "eval-result-${{ matrix.lens }}"
           path: "results/${{ matrix.lens }}.json"
+          if-no-files-found: error
+          retention-days: 90
 
   # ──────────────────────────────────────────────
   # Job 5: Static scan (4th quorum voter)
@@ -439,14 +473,15 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install Cisco skill-scanner
         # Pinned (see workflow env): the verdict logic below parses this
         # version's JSON, so an upgrade is a deliberate, tested change
-        run: pip install "cisco-ai-skill-scanner==${SKILL_SCANNER_VERSION}"
+        working-directory: ${{ runner.temp }}
+        run: python -m pip install "cisco-ai-skill-scanner==${SKILL_SCANNER_VERSION}"
 
       - name: Scan agent/skill directories
         run: |
@@ -462,16 +497,24 @@ jobs:
             # is invisible to the *.json glob below (it silently read nothing)
             OUT="${RAW_DIR}/scan$(echo "$root" | tr '/' '-').json"
             # --lenient accepts non-standard layouts (Claude Code agents are
-            # bare .md files, not SKILL.md packages). The tool's exit code is
-            # informational here: findings decide the vote, the quorum decides
-            # the build.
+            # bare .md files, not SKILL.md packages). Without --fail-on-findings,
+            # detected risks leave the process successful; a nonzero exit means
+            # incomplete analysis. Findings decide the vote, then quorum gates it.
             set +e
             skill-scanner scan-all "$root" --recursive --lenient --format json > "$OUT" 2>"${OUT}.err"
             EXIT_CODE=$?
             set -e
             echo "[$root] skill-scanner exit code: $EXIT_CODE"
-            if ! jq -e . "$OUT" > /dev/null 2>&1; then
-              echo "[$root] No parseable JSON output. stderr:"
+            # Accept the pinned scanner's Report schema, not any JSON object.
+            # Partial analyzer failure or skipped packages are incomplete evidence.
+            if [ "$EXIT_CODE" -ne 0 ] || ! jq -e '
+              type == "object" and (.summary | type == "object") and
+              (.results | type == "array") and
+              ((.summary.skills_skipped // [] | length) == 0) and
+              all(.results[]; (.findings | type == "array") and
+                ((.analyzers_failed // [] | length) == 0))
+            ' "$OUT" > /dev/null 2>&1; then
+              echo "[$root] Missing, invalid, or incomplete scan report. stderr:"
               cat "${OUT}.err" || true
               rm -f "$OUT"
               continue
@@ -483,13 +526,12 @@ jobs:
 
           # Scanned but found no report files to read: falls through to the
           # fail-closed branch. Empty input must never mean SAFE.
-          if [ "$SCANNED" -gt 0 ] && [ -n "$RAW_FILES" ]; then
-            # Best-effort normalization: the JSON schema is Cisco's, not ours,
-            # so recursively collect anything carrying a severity field and map
-            # it onto the shared evaluator contract. Critical/high = UNSAFE.
-            HIGH=$(jq -s '[.. | objects | .severity? // empty | tostring | ascii_downcase
+          if [ "$SCANNED" -gt 0 ] && [ "$SCANNED" -eq "$DIRS_PRESENT" ] && [ -n "$RAW_FILES" ]; then
+            # Normalize active findings only; suppressed findings are not votes.
+            # The validated Report schema is Cisco's. Critical/high = UNSAFE.
+            HIGH=$(jq -s '[.[] | (.results[].findings[], (.cross_skill_findings // [])[]) | .severity | tostring | ascii_downcase
                            | select(. == "critical" or . == "high")] | length' $RAW_FILES)
-            FINDINGS=$(jq -s '[.. | objects | select(.severity? != null)
+            FINDINGS=$(jq -s '[.[] | (.results[].findings[], (.cross_skill_findings // [])[])
               | {id: "UNMAPPED",
                  file: (.file // .file_path // .path // .skill // null),
                  detail: ((.severity | tostring | ascii_downcase) + ": "
@@ -505,7 +547,7 @@ jobs:
             echo "Verdict: SAFE (no agent/skill directories present after change)"
           else
             # Fail closed: directories exist but the scanner produced nothing usable
-            jq -n '{verdict:"UNSAFE",findings:[{id:"UNMAPPED",file:null,detail:"Static scanner produced no parseable output"}],model:"cisco-skill-scanner",lens:"static",error:true}' \
+            jq -n '{verdict:"UNSAFE",findings:[{id:"UNMAPPED",file:null,detail:"Static scanner did not produce a valid report for every directory"}],model:"cisco-skill-scanner",lens:"static",error:true}' \
               > results/static.json
             echo "FAIL-SAFE: static scanner produced no parseable output. Voting UNSAFE."
           fi
@@ -534,6 +576,8 @@ jobs:
         with:
           name: "eval-result-static"
           path: "results/static.json"
+          if-no-files-found: error
+          retention-days: 90
 
   # ──────────────────────────────────────────────
   # Job 6: Aggregate votes and apply quorum
@@ -545,6 +589,7 @@ jobs:
   aggregate:
     name: Quorum Decision
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     # The only job that writes: it comments on the PR and uploads SARIF.
     # It installs nothing and runs no model, so it can hold these safely.
     permissions:
@@ -552,13 +597,22 @@ jobs:
       pull-requests: write
       security-events: write
     needs: [detect_changes, test_file_gate, validate_structure, llm_scan, static_scan]
-    if: always() && (needs.detect_changes.outputs.has_changes == 'true' || needs.detect_changes.result != 'success')
+    if: always()
     steps:
+      - name: Report no relevant changes
+        if: needs.detect_changes.result == 'success' && needs.detect_changes.outputs.has_changes == 'false'
+        run: |
+          # A genuine no-op still supplies the required check, without model calls.
+          echo '## PASS: no agent, skill, or scanner changes require review' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No reviewers ran. This is a scope decision, not four SAFE votes.' >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.detect_changes.outputs.has_changes == 'true'
         with:
           persist-credentials: false
 
       - name: Download all evaluation results
+        if: needs.detect_changes.outputs.has_changes == 'true'
         # Missing artifacts must reach the decision step as errors.
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -568,6 +622,7 @@ jobs:
           merge-multiple: true
 
       - name: Apply quorum
+        if: always() && needs.detect_changes.outputs.has_changes == 'true'
         id: quorum
         run: |
           echo "=========================================="
@@ -643,7 +698,7 @@ jobs:
           echo "headline=$HEADLINE" >> "$GITHUB_OUTPUT"
 
       - name: Generate SARIF
-        if: always()
+        if: always() && needs.detect_changes.outputs.has_changes == 'true'
         run: |
           # Findings land in the GitHub Security tab via code scanning, mapped
           # to OWASP Agentic Skills Top 10 rule IDs (AST01..AST10)
@@ -723,16 +778,16 @@ jobs:
           echo "SARIF results: $(jq '.runs[0].results | length' results/scan.sarif)"
 
       - name: Upload SARIF to code scanning
-        if: always()
+        if: always() && needs.detect_changes.outputs.has_changes == 'true' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
         # Fork PRs lack security-events permission; the scan itself still gates
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: results/scan.sarif
           category: agent-security-quorum
 
       - name: Write job summary
-        if: always()
+        if: always() && needs.detect_changes.outputs.has_changes == 'true'
         env:
           HEADLINE: ${{ steps.quorum.outputs.headline }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -772,7 +827,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment on PR
-        if: always()
+        if: always() && needs.detect_changes.outputs.has_changes == 'true' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+        # Reporting is supplementary; a comment API failure is not a security vote.
+        continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           HEADLINE: ${{ steps.quorum.outputs.headline }}
@@ -834,7 +891,8 @@ jobs:
             // Same one-sentence story as the run page; fail-closed wording if missing
             const headline = process.env.HEADLINE || 'Scan failed: the scan did not complete, so it fails closed.';
 
-            let body = `## ${icon} Agent/Skill Security Scan\n\n**${headline}**\n\n`;
+            const marker = '<!-- agent-security-quorum -->';
+            let body = `${marker}\n## ${icon} Agent/Skill Security Scan\n\n**${headline}**\n\n`;
             body += `| Evaluator | Requested model / static engine | Verdict |\n|-----------|--------|---------|\n${rows.join('\n')}\n\n`;
             body += `**Decision: ${result}** (${unsafe}/4 UNSAFE; ${errors} evaluation errors)\n`;
             body += '\nTwo UNSAFE votes, any evaluation error, or a failed hard stop fails the scan. Branch protection must require **Quorum Decision** to enforce it at merge. Model names are requested configuration, not independently verified backend identity.\n';
@@ -853,14 +911,16 @@ jobs:
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             body += `\n---\n*Scanned commit \`${sha}\` in [run ${context.runId}](${runUrl}) by [agent-security-quorum](https://github.com/timothywarner-org/agent-security-quorum)*`;
 
-            const { data: comments } = await github.rest.issues.listComments({
+            // Only edit this bot's own report, never a user's matching comment.
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
 
             const existing = comments.find(c =>
-              c.body.includes('Agent/Skill Security Scan')
+              c.user?.login === 'github-actions[bot]' &&
+              (c.body.includes(marker) || /^## [✅❌] Agent\/Skill Security Scan/.test(c.body))
             );
 
             if (existing) {
@@ -879,11 +939,18 @@ jobs:
               });
             }
 
-      - name: Fail on UNSAFE quorum
-        # Fail-closed: fail unless the quorum step explicitly produced PASS.
-        # An empty result means the quorum step was skipped or errored, which
-        # must not merge as a pass under required-check protection.
-        if: always() && steps.quorum.outputs.result != 'PASS'
+      - name: Enforce final decision
+        # Missing detection output must never look like a successful scope skip.
+        if: always()
+        env:
+          DETECTION_RESULT: ${{ needs.detect_changes.result }}
+          HAS_CHANGES: ${{ needs.detect_changes.outputs.has_changes }}
+          DECISION: ${{ steps.quorum.outputs.result }}
         run: |
-          echo "❌ Quorum did not return PASS (result='${{ steps.quorum.outputs.result }}') — failing build."
+          if [ "$DETECTION_RESULT" = "success" ]; then
+            if [ "$HAS_CHANGES" = "false" ]; then exit 0; fi
+            if [ "$HAS_CHANGES" = "true" ] && [ "$DECISION" = "PASS" ]; then exit 0; fi
+          fi
+          echo '## FAIL: scan failed or required evidence is incomplete' >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Quorum Decision did not establish a valid PASS."
           exit 1

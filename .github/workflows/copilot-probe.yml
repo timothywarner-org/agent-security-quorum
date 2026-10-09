@@ -2,7 +2,7 @@
 #
 # The scanner has two ways to break without anyone noticing: the COPILOT_PAT
 # secret expires, or GitHub retires a model ID listed in agent-scan.yml.
-# Either one turns every LLM vote into a fail-safe UNSAFE, and nobody finds
+# Either one produces evaluation errors, and nobody finds
 # out until an agent PR is blocked. This probe fails loudly instead: GitHub
 # emails a failed scheduled run to the person who last edited the schedule.
 #
@@ -12,11 +12,19 @@ name: Copilot Access Probe
 
 on:
   schedule:
-    - cron: "0 13 * * 1" # Mondays, 13:00 UTC
+    - cron: "17 13 * * 1" # Mondays, 13:17 UTC; avoid the busy top of the hour
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: copilot-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   probe:
@@ -27,6 +35,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Read scanner runtime configuration
+        id: config
+        run: |
+          # The probe must exercise exactly the runtime used by the real scanner.
+          echo "node=$(yq '.env.NODE_VERSION' .github/workflows/agent-scan.yml)" >> "$GITHUB_OUTPUT"
 
       - name: Check the COPILOT_PAT token
         id: token
@@ -42,7 +56,7 @@ jobs:
           # The GitHub API answers 401 for an expired or revoked token. For a
           # token with an expiry date, it also returns that date in a header,
           # so the probe can warn before the token dies instead of after.
-          CODE=$(curl -sS -o /dev/null -D /tmp/headers.txt -w '%{http_code}' \
+          CODE=$(curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -D /tmp/headers.txt -w '%{http_code}' \
             -H "Authorization: Bearer $TOKEN" https://api.github.com/user)
           echo "GitHub API status: $CODE"
           # An API error must not be mistaken for a token with no expiry.
@@ -72,6 +86,9 @@ jobs:
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.config.outputs.node }}
+          package-manager-cache: false
 
       - name: Install the pinned Copilot CLI
         run: |
@@ -96,9 +113,13 @@ jobs:
             ( cd "$RUNNER_TEMP/probe" && copilot -p "Reply with exactly the word OK and nothing else." \
                 --model "$MODEL" \
                 --output-format json \
+                --no-auto-update \
                 --no-ask-user \
                 --no-custom-instructions \
                 --disable-builtin-mcps \
+                --deny-tool=read \
+                --deny-tool=url \
+                --deny-tool=memory \
                 --deny-tool=shell \
                 --deny-tool=write ) > /tmp/out.jsonl 2>/tmp/err.txt
             EXIT=$?

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Agent Security Quorum (ASQ)** is a pull-request gate for AI agent and skill definition files. The entire product is one GitHub Actions workflow (`.github/workflows/agent-scan.yml`) plus four prompt templates (`prompts/`). There is no build, no package manifest, and no `scripts/` directory.
 
-That minimalism is a hard design constraint for a fork-and-go teaching repo. Put new logic inline in the workflow (bash + `jq` + `perl` on `ubuntu-latest`) or in the prompts. Do not add `package.json`, TypeScript, or a scripts directory.
+That minimalism is a hard design constraint for a fork-and-go teaching repo. Put new logic inline in the workflow (bash + `jq` + `perl` on `ubuntu-24.04`) or in the prompts. Do not add `package.json`, TypeScript, or a scripts directory.
 
 The canonical repo is **`timothywarner-org/agent-security-quorum`**. Any `timothywarner/agent-security-quorum` URL in the tree is wrong (that repo returns 404).
 
@@ -19,16 +19,16 @@ There is no local build, lint, or unit-test toolchain. The test harness is a rea
 | Run the full scanner | Open a PR that adds or changes a file under a scanned directory (table below) |
 | Test one fixture | On a throwaway branch, copy a fixture into a scanned dir (for example `cp test/fixtures/prompt-injection.md .github/agents/`), push, open a PR |
 | Watch CI | `gh run list --workflow agent-scan.yml` then `gh run view <id> --log-failed` |
-| Run the static voter locally | `uvx --from cisco-ai-skill-scanner==2.1.0 skill-scanner scan-all <dir> --recursive --lenient --format json` |
-| Run one LLM lens locally | Concatenate `prompts/lens-<name>.txt`, `prompts/v1.txt`, and the target file wrapped in `=== BEGIN/END UNTRUSTED FILE: <path> ===` markers into a file. From an empty folder, run `copilot -p "$(cat prompt.txt)" --model <id> --output-format json --no-ask-user --no-custom-instructions --disable-builtin-mcps --deny-tool=shell --deny-tool=write`. Output is a JSONL event stream, not JSON. If a `GITHUB_TOKEN` env var is set, the CLI uses it ahead of your stored login (precedence: `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`) |
+| Run the static voter locally | `uvx --from cisco-ai-skill-scanner==2.2.1 skill-scanner scan-all <dir> --recursive --lenient --format json` |
+| Run one LLM lens locally | Concatenate `prompts/lens-<name>.txt`, `prompts/v1.txt`, and the target file wrapped in `=== BEGIN/END UNTRUSTED FILE: <path> ===` markers into a file. From an empty folder with a fresh `COPILOT_HOME`, run `copilot -p "$(cat prompt.txt)" --model <id> --output-format json --no-auto-update --no-ask-user --no-custom-instructions --disable-builtin-mcps --deny-tool=read --deny-tool=url --deny-tool=memory --deny-tool=shell --deny-tool=write`. Output is a JSONL event stream, not JSON. If a `GITHUB_TOKEN` env var is set, the CLI uses it ahead of your stored login (precedence: `COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`) |
 | Check Copilot access (token + every model ID) | `gh workflow run copilot-probe.yml` then `gh run watch`. Also runs weekly |
 | List model IDs the CLI accepts | `copilot help config` (see the `model` setting) |
 
-**Trigger gotcha:** the `on.pull_request.paths` filter matches only the scanned directories. A PR that changes only the workflow, `prompts/`, or `test/fixtures/` never runs the scanner. To exercise a workflow or prompt change, include an agent/skill file change in the same PR.
+**Trigger and scope:** every PR gets **Quorum Decision**. Unrelated or deletion-only changes get a scope-based PASS with no model calls. Scanner/probe workflow or prompt changes rescan all tracked agent/skill targets. Fixture-only changes outside those roots do not evaluate the fixtures themselves. See `docs/workflow-standard.md` for the version and maintenance contract.
 
 ### Scanned directories
 
-The list is duplicated in four places in the workflow and must stay in sync: the `paths:` trigger, the `git diff` pathspec in `detect_changes`, the loop in `test_file_gate`, and the loop in `static_scan`. `CODEOWNERS` and the README table repeat it too.
+The list is duplicated in three places in the workflow and must stay in sync: `ROOTS` in `detect_changes`, the loop in `test_file_gate`, and the loop in `static_scan`. `CODEOWNERS` and the README table repeat it too.
 
 `.github/agents/**`, `.github/skills/**`, `.claude/agents/**`, `.claude/skills/**`, `.agents/skills/**`
 
@@ -59,25 +59,25 @@ detect_changes ──┬─> test_file_gate      (deterministic, non-voting hard
 
 ### Cross-job mechanics
 
-- **Changed-file list** travels between jobs as base64 in job outputs, so arbitrary filenames survive `${{ }}` interpolation. Keep it encoded; never interpolate raw filenames into expressions. `git -c core.quotePath=false diff` keeps non-ASCII names unquoted; any listed file the LLM job still cannot open produces an `AST08` UNSAFE vote instead of a silent skip.
-- **Pinned versions** (`COPILOT_CLI_VERSION`, `SKILL_SCANNER_VERSION`) are in the workflow-level `env:` block of `agent-scan.yml`. `copilot-probe.yml` reads them and the model IDs from that file with `yq`, so change them in one place only.
-- **Analyzer isolation.** The CLI loads project config (agents, skills, hooks, MCP servers, instruction files) from its working directory, and the checkout is the untrusted PR. `llm_scan` therefore runs the CLI from an empty `$RUNNER_TEMP/asq-analyzer` folder with a fresh `COPILOT_HOME`, `--no-custom-instructions`, `--disable-builtin-mcps`, and shell/write denied. Never run it from the checkout or pass the checkout with `--add-dir` (that flag loads the folder's skills and agents as trusted config).
+- **Changed-file list** uses NUL-delimited Git output, rejects newline-containing names, then travels between jobs as base64. Never interpolate raw filenames into expressions. Symlinks and submodules under any scan root fail detection when a review is required. Any selected file the LLM cannot read produces an evaluator error, never a silent skip.
+- **Pinned versions** (`COPILOT_CLI_VERSION`, `SKILL_SCANNER_VERSION`, `NODE_VERSION`, `PYTHON_VERSION`) are in the workflow-level `env:` block of `agent-scan.yml`. `copilot-probe.yml` reads its CLI/runtime versions and model IDs from that file with `yq`. Dependabot maintains action SHA pins; embedded runtime and analyzer versions require deliberate review.
+- **Analyzer isolation.** The CLI loads project config (agents, skills, hooks, MCP servers, instruction files) from its working directory, and the checkout is the untrusted PR. `llm_scan` therefore runs the CLI from an empty `$RUNNER_TEMP/asq-analyzer` folder with a fresh `COPILOT_HOME`, `--no-custom-instructions`, `--disable-builtin-mcps`, and read/url/memory/shell/write denied. `--no-auto-update` preserves the installed pin. Never run it from the checkout or pass the checkout with `--add-dir` (that flag loads the folder's skills and agents as trusted config).
 - **Permissions.** Workflow default is `contents: read`; only `aggregate` gets `pull-requests: write` and `security-events: write`. Every checkout uses `persist-credentials: false`.
 - **Evaluator contract.** Every voter writes `results/<lens>.json`: `{verdict: SAFE|UNSAFE, findings: [{id, file, detail}], model, lens, error?}` and uploads it as artifact `eval-result-<lens>`. `aggregate` downloads `eval-result-*` with `merge-multiple`. Finding `id` is an OWASP Agentic Skills Top 10 code (`AST01` to `AST10`) or `UNMAPPED`.
 - **Voter names are hardcoded in four places in `aggregate`:** the quorum loop, the SARIF loop, the job-summary loop, and the `lenses` array in the `github-script` step. Adding, renaming, or removing a voter means editing all four plus the `/4` denominators in the summary and PR comment.
-- **Prompt assembly** is `lens-<name>.txt` + `v1.txt` + wrapped file contents. The matrix `lens` value must match the lens filename. `v1.txt` ends with `Analyze these file(s):` and the file block is appended directly after it, so that line must stay last. Files are capped at 16 KB each; binaries are skipped.
+- **Prompt assembly** is `lens-<name>.txt` + `v1.txt` + wrapped file contents. The matrix `lens` value must match the lens filename. `v1.txt` ends with `Analyze these file(s):` and the file block is appended directly after it, so that line must stay last. Binary files and files exceeding 16 KiB produce evaluator errors; neither silent omission nor truncation is allowed.
 - **Copilot CLI output parsing:** `--output-format json` emits JSONL events. Read **only** `assistant.message` events (`.data.content`), then a `perl` recursive regex finds the first balanced `{...}` containing `"verdict"`. Only exact `SAFE`/`UNSAFE` strings are accepted. Never widen the selector: the stream also contains a `user.message` event that echoes the whole prompt, and the prompt's format example is `{"verdict":"SAFE","findings":[]}`. A broad selector made all three voters return SAFE on a live prompt-injection PR (run 35404329423, fixed in the commit after `de6dbdd`).
 - **No model fallback, on purpose.** One requested model per vendor (`gpt-5.5`, `claude-sonnet-5`, `gemini-3.7-flash` as of 2026-09). A rejected model ID produces an error result and fails the decision. Do not reintroduce a retry without `--model`: it silently turns three vendors into three copies of the default model. Model IDs retire; `copilot-probe.yml` checks them weekly when the token preflight passes.
-- **Static voter normalization** collects objects carrying a `severity` field; any `critical` or `high` makes the vote UNSAFE. Raw report files carry a `scan` prefix because Bash's glob skips dotfiles. Scanned-but-no-reports fails closed. Findings map to `UNMAPPED`; `file_path` is accepted alongside `file`, `path`, and `skill`.
-- **SARIF** combines all voter findings plus the gate result (as `AST02`), sets `startLine: 1`, and anchors path-less findings to the first changed file. Upload uses `continue-on-error` because fork PRs lack `security-events: write`.
-- **PR comment** is upserted by searching existing comments for the string `Agent/Skill Security Scan`.
+- **Static voter normalization** validates the pinned Report schema and requires a completed report for every existing root, without skipped skills or failed analyzers. Only active `results[].findings` and `cross_skill_findings` count; any `critical` or `high` makes the vote UNSAFE. Raw report files carry a `scan` prefix because Bash's glob skips dotfiles. Findings map to `UNMAPPED`; `file_path` is accepted alongside `file`, `path`, and `skill`.
+- **SARIF** combines all voter findings plus the gate result (as `AST02`), sets `startLine: 1`, and anchors path-less findings to the first changed file. Upload and PR comments are supplementary, use `continue-on-error`, and are skipped for forks and Dependabot.
+- **PR comment** is upserted using the bot's hidden marker (or its legacy report heading), with pagination and a check that the author is `github-actions[bot]`.
 
 ### Fail-closed invariants (preserve all of these)
 
 - Extraction failure, missing/malformed artifact, or unknown verdict is an ERROR that independently fails the decision. Compatibility artifacts may contain `verdict: UNSAFE, error: true`; do not count them as valid vulnerability votes.
-- `static_scan` votes UNSAFE if scanned directories exist but the scanner produced no parseable JSON.
-- `aggregate` runs with `if: always()` so a failed gate still yields a red required check instead of a skipped (passing) one.
-- The final step fails unless the quorum output is exactly `PASS`; the PR comment defaults to `FAIL` when outputs are missing.
+- `static_scan` produces an evaluator ERROR if any scanned directory lacks a valid complete report or its scanner process fails.
+- `aggregate` runs with `if: always()` so failed detection or a failed gate still yields a failed required check instead of a skipped one.
+- The final step passes only after successful detection reports no relevant changes, or successful detection requires review and the quorum explicitly returns `PASS`. The PR comment defaults to `FAIL` when outputs are missing.
 
 ## Repo traps
 

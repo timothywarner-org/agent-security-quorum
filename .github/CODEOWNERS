@@ -9,3 +9,5 @@
 prompts/          @timothywarner
 .github/workflows/agent-scan.yml @timothywarner
 .github/workflows/copilot-probe.yml @timothywarner
+.github/dependabot.yml @timothywarner
+.github/CODEOWNERS @timothywarner

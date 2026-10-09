@@ -67,11 +67,13 @@ Copilot usage draws on the authenticated user's entitlements and may incur charg
 | .claude/agents/**, .claude/skills/** | Agent and skill definitions and bundled files |
 | .agents/skills/** | Shared skill definitions and bundled files |
 
-Semantic reviewers receive changed text files, capped at **16 KiB per file**; binary and empty files are omitted from the model payload. The static scanner and file-pattern gate inspect the corresponding directories. This is not full-file semantic coverage for large files or a malware sandbox. Structural checks are **advisory**.
+Semantic reviewers receive changed text files. Binary files and files exceeding **16 KiB** produce an evaluation error instead of a silently incomplete review. Agent and skill folders may not contain symlinks or submodules. The static scanner and file-pattern gate inspect the corresponding directories. This is not a malware sandbox. Structural checks are **advisory**.
 
-PRs changing only workflow files, prompts, or fixtures do not trigger the scanner. Include a harmless agent change when testing the scanner itself. Deletion-only changes have no semantic payload and skip the decision job. Fork PRs normally lack **COPILOT_PAT**; missing credentials cannot produce a valid complete scan.
+Every PR receives **Quorum Decision**. Unrelated and deletion-only changes report that no review is needed, without running models. Changes to scanner/probe workflows or prompts rescan all tracked agent and skill files. Fork and Dependabot PRs normally lack **COPILOT_PAT**; a relevant scan fails closed without it, while write-only reporting steps are skipped.
 
 The PR can also change its own workflow and prompts. **Required code-owner review** is therefore part of the trust boundary. See the [threat model](docs/threat-model.md) before adopting this as a security control.
+
+The [workflow standard](docs/workflow-standard.md) records the verified stable releases, GitHub guidance, and maintenance process. Dependabot proposes weekly Action-pin updates; it does not merge them.
 
 ## Repository map
 
