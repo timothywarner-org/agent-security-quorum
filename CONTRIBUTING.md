@@ -1,40 +1,59 @@
 # Contributing to Agent Security Quorum
 
-Thanks for your interest in contributing. This project is open to contributions of all kinds — bug fixes, new features, documentation improvements, and test fixtures.
+Contribute a reproducible finding, a focused fix, or a teaching example. Keep the product small: workflows and prompts, with a separate test harness for repeatable policy checks.
 
 ## Getting Started
 
-1. Fork the repository
-2. Create a feature branch from `main`
-3. Make your changes
-4. Open a pull request
+1. Start with the [fixture scorecard](docs/fixture-scorecard.md) and [contribution roadmap](docs/community-roadmap.md).
+2. Fork the repository and create a branch from main.
+3. Make one focused change. Treat malicious fixtures as data; do not run their code or install them as active agent skills.
+4. Run the deterministic checks below, or let **Community Checks / Policy regression** run on your PR. No Copilot subscription or token is needed for these checks. GitHub may require maintainer approval before a first-time contributor's workflow runs.
+5. Open a PR with the problem, evidence, and validation. State explicitly if live model evaluation was not performed.
+
+## Verify without a model account
+
+Requirements: Python 3.11+, Git, Bash, jq, and Perl. The hosted Ubuntu check supplies the command-line tools. On Windows, use Git for Windows and make jq available in Git Bash.
+
+```powershell
+python -m pip install --requirement test/requirements.txt
+python test/check_workflow.py
+```
+
+The four test groups cover **36 cases** against shell extracted from the real scanner workflow: quorum, final decision, changed-file detection, and static report validation. They do not call models, execute attack fixtures, or measure detection accuracy. Prefer the hosted check if you do not want local tooling.
+
+## Fork PRs and live reviews
+
+GitHub does not normally give fork or Dependabot PRs this repository's COPILOT_PAT. **Policy regression** can pass while a relevant **Quorum Decision** fails because model evidence is unavailable. Unrelated changes receive a scope-based PASS. A fixture-only change does not automatically run that fixture through the models.
+
+For a change needing live review, the maintainer inspects the exact diff, especially workflows, prompts, package configuration, and test code, before applying it to a same-repository branch. Preserve the original contribution's attribution and cross-link both PRs. Review the fresh run before merging the maintainer PR, then close the original as incorporated. Never use pull_request_target to execute an untrusted checkout with privileged credentials.
 
 ## What We Need
 
-- **Prompt improvements** — better rubrics, fewer false positives, more attack pattern examples in `prompts/`
-- **Test fixtures** — new agent/skill files in `test/fixtures/` that cover edge cases
-- **Model support** — testing with additional Copilot CLI models as they become available
-- **Documentation** — corrections, clarifications, translations
-- **JSONL extraction hardening** — if you encounter a Copilot CLI output format we don't handle, open an issue with the raw output
+- **Fixtures:** minimal enterprise scenarios with intended outcomes, observed results, and known misses. Use the scorecard's evidence format.
+- **Parser regressions:** synthetic JSONL that demonstrates an extraction failure without disclosing the original prompt or credentials.
+- **Prompt improvements:** a before/after comparison that includes false alarms as well as detected risks.
+- **Documentation:** verify instructions against the current release and identify the source of any product claim.
 
 ## Guidelines
 
-- Keep the workflow self-contained. No external scripts, no build steps, no npm project.
-- Prompts should be as short as possible. Every token costs money across 3 models per PR.
-- Test your changes by opening a PR that includes agent/skill files — the scanner will run automatically.
+- Keep scanner runtime logic inline. The small test-only harness is an intentional exception; do not add an application, build system, or provider framework.
+- Keep prompts concise. Live reviews make three separate model calls and consume the maintainer's entitlement.
+- Keep tests isolated from **test/fixtures/**. Never use unrestricted test discovery that could execute a deliberately hostile file.
 - Follow conventional commit format: `feat:`, `fix:`, `docs:`, `test:`, `chore:`
 
 ## Reporting Issues
 
-Open an issue at https://github.com/timothywarner-org/agent-security-quorum/issues with:
+For ordinary defects, [open an issue](https://github.com/timothywarner-org/agent-security-quorum/issues/new/choose) with:
 
 - What you expected to happen
 - What actually happened
-- The CI log output (if applicable)
+- Release or commit, run URL, and a sanitized diagnostic excerpt
+
+Remove credentials, private source, personal data, and internal URLs. Complete CLI event streams can echo source files. For exploitable vulnerabilities, follow [SECURITY.md](SECURITY.md) instead.
 
 ## Contact
 
-- **Tim Warner** — maintainer
+- **Tim Warner**, maintainer
 - Website: [TechTrainerTim.com](https://techtrainertim.com)
 - Email: tim@techtrainertim.com
 

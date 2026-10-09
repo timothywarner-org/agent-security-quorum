@@ -1,0 +1,49 @@
+{
+  "evidence_type": "observed_live_run",
+  "captured_on": "2026-10-09",
+  "run_id": 37864270825,
+  "run_url": "https://github.com/timothywarner-org/agent-security-quorum/actions/runs/37864270825",
+  "source_commit": "22e220d943c0479cc2bc38d42bb8160b6e9594ed",
+  "started_at_utc": "2026-10-09T00:20:31Z",
+  "conclusion": "failure",
+  "authentication_http_status": 200,
+  "token_expires_at_utc": "2026-10-18T23:03:57Z",
+  "reported_whole_days_remaining": 9,
+  "maintenance_threshold_days": 14,
+  "model_checks": "skipped after maintenance threshold failure",
+  "steps": [
+    {
+      "name": "Set up job",
+      "conclusion": "success"
+    },
+    {
+      "name": "Run actions/checkout@v4",
+      "conclusion": "success"
+    },
+    {
+      "name": "Check the COPILOT_PAT token",
+      "conclusion": "failure"
+    },
+    {
+      "name": "Run actions/setup-node@v4",
+      "conclusion": "skipped"
+    },
+    {
+      "name": "Install the pinned Copilot CLI",
+      "conclusion": "skipped"
+    },
+    {
+      "name": "Check every configured model still answers",
+      "conclusion": "skipped"
+    },
+    {
+      "name": "Post Run actions/checkout@v4",
+      "conclusion": "success"
+    },
+    {
+      "name": "Complete job",
+      "conclusion": "success"
+    }
+  ],
+  "limitations": "Dated token-maintenance result, not failed authentication, an evaluator vulnerability finding, or proof of current token validity."
+}

@@ -1,4 +1,5 @@
 # Agent Security Quorum
+> **Historical review, September 18, 2026.** Several findings were subsequently fixed. Consult the current workflow, [configuration guide](docs/configuration-guide.md), and [recorded demo evidence](docs/demo-walkthrough.md) before treating an item below as an outstanding defect.
 ## Comprehensive Code Review and Claude Code Remediation Handoff
 
 **Repository:** `timothywarner-org/agent-security-quorum`  

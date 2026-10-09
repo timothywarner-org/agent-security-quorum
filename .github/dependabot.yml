@@ -1,0 +1,16 @@
+# Keep immutable Action pins reviewable without adding another runtime workflow.
+# Dependabot proposes updates; a maintainer still reviews and tests them.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:23"
+      timezone: America/Chicago
+    open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns:
+          - "*"

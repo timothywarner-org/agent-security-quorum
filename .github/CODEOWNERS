@@ -6,6 +6,9 @@
 .agents/skills/   @timothywarner
 
 # The scanner itself requires review
-scripts/          @timothywarner
 prompts/          @timothywarner
-.github/workflows/agent-scan.yml @timothywarner
+.github/workflows/ @timothywarner
+.github/dependabot.yml @timothywarner
+.github/CODEOWNERS @timothywarner
+test/ @timothywarner
+SECURITY.md @timothywarner
